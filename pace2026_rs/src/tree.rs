@@ -1,6 +1,7 @@
 use num_bigint::BigUint;
 use num_traits::Zero;
 use std::collections::HashSet;
+use std::sync::Arc;
 
 #[derive(Clone, Debug)]
 pub struct OriginalNode {
@@ -18,7 +19,7 @@ pub enum Expansion {
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Tree {
     Leaf(u32, BigUint),
-    Node(Box<Tree>, Box<Tree>, BigUint, usize),
+    Node(Arc<Tree>, Arc<Tree>, BigUint, usize),
 }
 
 impl Tree {
@@ -34,20 +35,20 @@ impl Tree {
     }
 }
 
-pub fn original_to_tree(node: &OriginalNode) -> Tree {
+pub fn original_to_tree(node: &OriginalNode) -> Arc<Tree> {
     if let Some(id) = node.label {
-        Tree::Leaf(id, BigUint::from(1u32) << (id - 1))
+        Arc::new(Tree::Leaf(id, BigUint::from(1u32) << (id - 1)))
     } else {
         let l = original_to_tree(node.left.as_ref().unwrap());
         let r = original_to_tree(node.right.as_ref().unwrap());
         let m = l.mask() | r.mask();
         let s = l.size() + r.size();
-        Tree::Node(Box::new(l), Box::new(r), m, s)
+        Arc::new(Tree::Node(l, r, m, s))
     }
 }
 
-pub fn collect_cherries(tree: &Tree, cherries: &mut HashSet<(u32, u32)>) {
-    if let Tree::Node(l, r, _, _) = tree {
+pub fn collect_cherries(tree: &Arc<Tree>, cherries: &mut HashSet<(u32, u32)>) {
+    if let Tree::Node(l, r, _, _) = tree.as_ref() {
         if l.is_leaf() && r.is_leaf() {
             let a = l.leaf_id(); let b = r.leaf_id();
             cherries.insert(if a < b { (a, b) } else { (b, a) });
@@ -57,11 +58,11 @@ pub fn collect_cherries(tree: &Tree, cherries: &mut HashSet<(u32, u32)>) {
     }
 }
 
-pub fn cut_leaf(tree: &Tree, leaf_id: u32) -> Option<Tree> {
+pub fn cut_leaf(tree: &Arc<Tree>, leaf_id: u32) -> Option<Arc<Tree>> {
     let target_mask = BigUint::from(1u32) << (leaf_id - 1);
     if (tree.mask() & &target_mask).is_zero() { return Some(tree.clone()); }
     
-    match tree {
+    match tree.as_ref() {
         Tree::Leaf(id, _) => if *id == leaf_id { None } else { Some(tree.clone()) },
         Tree::Node(l, r, _, _) => {
             let nl = cut_leaf(l, leaf_id);
@@ -72,72 +73,73 @@ pub fn cut_leaf(tree: &Tree, leaf_id: u32) -> Option<Tree> {
                 (Some(tl), Some(tr)) => {
                     let m = tl.mask() | tr.mask();
                     let s = tl.size() + tr.size();
-                    Some(Tree::Node(Box::new(tl), Box::new(tr), m, s))
+                    Some(Arc::new(Tree::Node(tl, tr, m, s)))
                 }
             }
         }
     }
 }
 
-pub fn contract_cherry(tree: &Tree, a: u32, b: u32, new_id: u32) -> Tree {
+pub fn contract_cherry(tree: &Arc<Tree>, a: u32, b: u32, new_id: u32) -> Arc<Tree> {
     let target_mask = (BigUint::from(1u32) << (a - 1)) | (BigUint::from(1u32) << (b - 1));
     if (tree.mask() & &target_mask).is_zero() { return tree.clone(); }
     
-    match tree {
+    match tree.as_ref() {
         Tree::Leaf(_, _) => tree.clone(),
         Tree::Node(l, r, _, _) => {
             if l.is_leaf() && r.is_leaf() {
                 let id_l = l.leaf_id(); let id_r = r.leaf_id();
                 if (id_l == a && id_r == b) || (id_l == b && id_r == a) {
-                    return Tree::Leaf(new_id, BigUint::from(1u32) << (new_id - 1));
+                    return Arc::new(Tree::Leaf(new_id, BigUint::from(1u32) << (new_id - 1)));
                 }
             }
             let nl = contract_cherry(l, a, b, new_id);
             let nr = contract_cherry(r, a, b, new_id);
+            if Arc::ptr_eq(&nl, l) && Arc::ptr_eq(&nr, r) { return tree.clone(); }
             let m = nl.mask() | nr.mask();
             let s = nl.size() + nr.size();
-            Tree::Node(Box::new(nl), Box::new(nr), m, s)
+            Arc::new(Tree::Node(nl, nr, m, s))
         }
     }
 }
 
-pub fn path_to_leaf(tree: &Tree, target_leaf: u32) -> Vec<(Tree, usize)> {
+pub fn path_to_leaf(tree: &Arc<Tree>, target_leaf: u32) -> Vec<(Arc<Tree>, usize)> {
     let mut path = Vec::new();
-    let mut curr = tree;
+    let mut curr = tree.clone();
     let target_mask = BigUint::from(1u32) << (target_leaf - 1);
-    while let Tree::Node(l, r, _, _) = curr {
+    while let Tree::Node(l, r, _, _) = curr.as_ref() {
         if !(l.mask() & &target_mask).is_zero() {
-            path.push((curr.clone(), 0)); curr = l;
+            path.push((curr.clone(), 0)); curr = l.clone();
         } else if !(r.mask() & &target_mask).is_zero() {
-            path.push((curr.clone(), 1)); curr = r;
+            path.push((curr.clone(), 1)); curr = r.clone();
         } else { break; }
     }
     path
 }
 
-pub fn offpath_candidates(tree: &Tree, a: u32, b: u32) -> Vec<Tree> {
+pub fn offpath_candidates(tree: &Arc<Tree>, a: u32, b: u32) -> Vec<Arc<Tree>> {
     let path_a = path_to_leaf(tree, a);
     let path_b = path_to_leaf(tree, b);
     let mut i = 0;
     while i < path_a.len() && i < path_b.len() {
-        if path_a[i].0 == path_b[i].0 && path_a[i].1 == path_b[i].1 { i += 1; }
+        if Arc::ptr_eq(&path_a[i].0, &path_b[i].0) && path_a[i].1 == path_b[i].1 { i += 1; }
         else { break; }
     }
     let mut candidates = Vec::new();
     for (p, side) in path_a.iter().skip(i) {
-        if let Tree::Node(l, r, _, _) = p {
-            candidates.push(if *side == 0 { r.as_ref().clone() } else { l.as_ref().clone() });
+        if let Tree::Node(l, r, _, _) = p.as_ref() {
+            candidates.push(if *side == 0 { r.clone() } else { l.clone() });
         }
     }
     for (p, side) in path_b.iter().skip(i) {
-        if let Tree::Node(l, r, _, _) = p {
-            candidates.push(if *side == 0 { r.as_ref().clone() } else { l.as_ref().clone() });
+        if let Tree::Node(l, r, _, _) = p.as_ref() {
+            candidates.push(if *side == 0 { r.clone() } else { l.clone() });
         }
     }
     candidates
 }
 
-pub fn get_all_leaves(tree: &Tree) -> Vec<u32> {
+pub fn get_all_leaves(tree: &Arc<Tree>) -> Vec<u32> {
     let mut leaves = Vec::new();
     let mut mask = tree.mask().clone();
     let mut idx = 1;
@@ -148,9 +150,9 @@ pub fn get_all_leaves(tree: &Tree) -> Vec<u32> {
     leaves
 }
 
-pub fn get_cluster_masks(tree: &Tree, masks: &mut HashSet<BigUint>) {
+pub fn get_cluster_masks(tree: &Arc<Tree>, masks: &mut HashSet<BigUint>) {
     masks.insert(tree.mask().clone());
-    if let Tree::Node(l, r, _, _) = tree {
+    if let Tree::Node(l, r, _, _) = tree.as_ref() {
         get_cluster_masks(l, masks);
         get_cluster_masks(r, masks);
     }

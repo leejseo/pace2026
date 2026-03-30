@@ -1,11 +1,11 @@
 use std::collections::{HashMap, HashSet};
 use crate::tree::{Tree, Expansion, collect_cherries, contract_cherry, get_cluster_masks};
-use num_bigint::BigUint;
+use std::sync::Arc;
 
 #[derive(Clone, Debug)]
 pub struct State {
-    pub tree1: Tree,
-    pub tree2: Tree,
+    pub tree1: Arc<Tree>,
+    pub tree2: Arc<Tree>,
     pub expansions: HashMap<u32, Expansion>,
     pub next_id: u32,
     pub cut_components: Vec<Expansion>,
@@ -35,12 +35,15 @@ pub fn normalize_state(mut state: State) -> State {
         let common: Vec<_> = c1.intersection(&c2).collect();
         if common.is_empty() { break; }
         
-        let (a, b) = **common.iter().min().unwrap();
+        let mut sorted_common = common;
+        sorted_common.sort();
+        let &(a, b) = sorted_common[0];
+        
         let new_id = state.next_id;
         state.next_id += 1;
         
-        let exp_a = state.expansions.get(&a).unwrap().clone();
-        let exp_b = state.expansions.get(&b).unwrap().clone();
+        let exp_a = state.expansions.get(&a).cloned().unwrap_or(Expansion::Leaf(a));
+        let exp_b = state.expansions.get(&b).cloned().unwrap_or(Expansion::Leaf(b));
         state.expansions.insert(new_id, Expansion::Node(Box::new(exp_a), Box::new(exp_b)));
         
         state.tree1 = contract_cherry(&state.tree1, a, b, new_id);
