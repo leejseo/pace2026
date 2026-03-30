@@ -1,0 +1,29 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Rust
+target/
+**/*.rs.bk
+
+# PACE Instances & Data
+instances/
+*.nw
+*.in
+*.gr
+
+# Local Documentation (As requested)
+docs/
+
+# OS generated files
+.DS_Store
+.DS_Store?
+ehthumbs.db
+Icon?
+Thumbs.db
+
+# Evaluation scripts & Trace logs
+trace_*.py
+evaluate_*.py
+ITERATION_LOG.md
