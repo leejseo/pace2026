@@ -1,4 +1,4 @@
-use crate::tree::{ArenaTree, OriginalNode};
+use crate::tree::{OriginalNode};
 use anyhow::{Result, bail};
 use std::fs;
 
