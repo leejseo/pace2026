@@ -20,3 +20,10 @@
 | heuristic00.nw | 31 | 32 | INV |
 | heuristic10.nw | INV | INV | 17 |
 | heuristic20.nw | 13 | 13 | 13 |
+
+### Run 20260331_194232
+| Instance | 30s | 60s | 120s |
+| --- | --- | --- | --- |
+| heuristic00.nw | 32 | 33 | 32 |
+| heuristic10.nw | 17 | 17 | 17 |
+| heuristic20.nw | 13 | 13 | 13 |
