@@ -3,7 +3,7 @@ mod state;
 mod io;
 
 use std::collections::{HashMap, HashSet};
-use crate::tree::{Tree, Expansion, original_to_tree, collect_cherries, cut_leaf, get_all_leaves, OriginalNode, FastBitSet};
+use crate::tree::{Tree, Expansion, original_to_tree, collect_cherries, cut_leaf, offpath_candidates, get_all_leaves, OriginalNode, FastBitSet};
 use crate::state::{State, normalize_state};
 use crate::io::{parse_instance_file, render_expansion};
 use anyhow::Result;
@@ -35,8 +35,8 @@ fn main() -> Result<()> {
 fn run(time_limit: u64) -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
     let instance = parse_instance_file(&args[1])?;
-    let t1 = original_to_tree(&instance.tree1);
-    let t2 = original_to_tree(&instance.tree2);
+    let t1 = original_to_tree(&instance.tree1, instance.n_leaves);
+    let t2 = original_to_tree(&instance.tree2, instance.n_leaves);
     let partition = solve_partition(t1, t2, instance.n_leaves, time_limit, &instance.tree1, &instance.tree2);
     for leaf_set in partition {
         if let Some(exp) = build_induced_expansion(&instance.tree1, &leaf_set) {
@@ -103,19 +103,19 @@ fn solve_partition(t1: Arc<Tree>, t2: Arc<Tree>, n_leaves: u32, limit_seconds: u
                     for i in 1..=n_leaves { if !kept_leaves.contains(&i) { remaining_leaves.insert(i); } }
                     
                     if let (Some(nt1_exp), Some(nt2_exp)) = (build_induced_expansion(ot1, &remaining_leaves), build_induced_expansion(ot2, &remaining_leaves)) {
-                        fn exp_to_tree(e: &Expansion) -> Arc<Tree> {
+                        fn exp_to_tree(e: &Expansion, n_leaves: u32) -> Arc<Tree> {
                             match e { Expansion::Leaf(id) => {
-                                let mut m = FastBitSet::new(); m.set(*id);
+                                let mut m = FastBitSet::new(n_leaves + 1000); m.set(*id);
                                 let mut hasher = std::collections::hash_map::DefaultHasher::new();
-                                m.words.hash(&mut hasher);
+                                use std::hash::Hash; m.words.hash(&mut hasher);
                                 Arc::new(Tree::Leaf(*id, m, hasher.finish()))
-                            }, Expansion::Node(l, r) => { let tl = exp_to_tree(l); let tr = exp_to_tree(r);
+                            }, Expansion::Node(l, r) => { let tl = exp_to_tree(l, n_leaves); let tr = exp_to_tree(r, n_leaves);
                                 let m = tl.mask().or(tr.mask());
                                 let mut hasher = std::collections::hash_map::DefaultHasher::new();
-                                m.words.hash(&mut hasher);
+                                use std::hash::Hash; m.words.hash(&mut hasher);
                                 Arc::new(Tree::Node(tl.clone(), tr.clone(), m, hasher.finish(), tl.size() + tr.size())) } }
                         }
-                        curr = normalize_state(State { tree1: exp_to_tree(&nt1_exp), tree2: exp_to_tree(&nt2_exp), expansions: start_state.expansions.clone(), next_id: start_state.next_id, cut_components: Vec::new(), cached_score: (0, 0, 0) });
+                        curr = normalize_state(State { tree1: exp_to_tree(&nt1_exp, n_leaves), tree2: exp_to_tree(&nt2_exp, n_leaves), expansions: start_state.expansions.clone(), next_id: start_state.next_id, cut_components: Vec::new(), cached_score: (0, 0, 0) });
                         p = to_keep;
                     }
                 }
@@ -128,7 +128,8 @@ fn solve_partition(t1: Arc<Tree>, t2: Arc<Tree>, n_leaves: u32, limit_seconds: u
                 let next_t2 = cut_leaf(&curr.tree2, leaf_id);
                 let mut next_nc = curr.cut_components.clone();
                 next_nc.push(curr.expansions.get(&leaf_id).cloned().unwrap_or(Expansion::Leaf(leaf_id)));
-                curr = normalize_state(State { tree1: next_t1.unwrap_or(Arc::new(Tree::Leaf(0, FastBitSet::new(), 0))), tree2: next_t2.unwrap_or(Arc::new(Tree::Leaf(0, FastBitSet::new(), 0))), expansions: curr.expansions.clone(), next_id: curr.next_id, cut_components: next_nc, cached_score: (0, 0, 0) });
+                let m_size = curr.tree1.mask().words.len() as u32 * 64;
+                curr = normalize_state(State { tree1: next_t1.unwrap_or(Arc::new(Tree::Leaf(0, FastBitSet::new(m_size), 0))), tree2: next_t2.unwrap_or(Arc::new(Tree::Leaf(0, FastBitSet::new(m_size), 0))), expansions: curr.expansions.clone(), next_id: curr.next_id, cut_components: next_nc, cached_score: (0, 0, 0) });
             }
             
             if curr.tree1.is_leaf() {
@@ -176,5 +177,8 @@ fn merge_partitions(mut p: Vec<HashSet<u32>>, ot1: &OriginalNode, ot2: &Original
 }
 
 fn collect_leaves(exp: &Expansion, set: &mut HashSet<u32>) {
-    match exp { Expansion::Leaf(id) => { set.insert(*id); } Expansion::Node(l, r) => { collect_leaves(l, set); collect_leaves(r, set); } }
+    let mut stack = vec![exp];
+    while let Some(e) = stack.pop() {
+        match e { Expansion::Leaf(id) => { set.insert(*id); } Expansion::Node(l, r) => { stack.push(l); stack.push(r); } }
+    }
 }

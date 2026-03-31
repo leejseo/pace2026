@@ -1,30 +1,32 @@
+use num_bigint::BigUint;
+use num_traits::Zero;
 use std::collections::{HashSet, hash_map::DefaultHasher};
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
-// Support up to 16384 leaves with fixed-size bitset for maximum speed
-const BITSET_WORDS: usize = 256;
-
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
 pub struct FastBitSet {
-    pub words: [u64; BITSET_WORDS],
+    pub words: Vec<u64>,
 }
 
 impl FastBitSet {
-    pub fn new() -> Self { Self { words: [0; BITSET_WORDS] } }
+    pub fn new(n_leaves: u32) -> Self {
+        let size = ((n_leaves + 63) / 64) as usize;
+        Self { words: vec![0; size] }
+    }
     pub fn set(&mut self, bit: u32) {
         if bit == 0 { return; }
         let bit = bit - 1;
-        self.words[(bit / 64) as usize] |= 1 << (bit % 64);
+        let idx = (bit / 64) as usize;
+        if idx < self.words.len() { self.words[idx] |= 1 << (bit % 64); }
     }
-    pub fn is_zero(&self) -> bool { self.words.iter().all(|&w| w == 0) }
     pub fn or(&self, other: &Self) -> Self {
-        let mut res = [0u64; BITSET_WORDS];
-        for i in 0..BITSET_WORDS { res[i] = self.words[i] | other.words[i]; }
+        let mut res = self.words.clone();
+        for i in 0..res.len().min(other.words.len()) { res[i] |= other.words[i]; }
         Self { words: res }
     }
     pub fn and_is_zero(&self, other: &Self) -> bool {
-        for i in 0..BITSET_WORDS { if (self.words[i] & other.words[i]) != 0 { return false; } }
+        for i in 0..self.words.len().min(other.words.len()) { if (self.words[i] & other.words[i]) != 0 { return false; } }
         true
     }
 }
@@ -62,14 +64,14 @@ fn compute_mask_hash(m: &FastBitSet) -> u64 {
     s.finish()
 }
 
-pub fn original_to_tree(node: &OriginalNode) -> Arc<Tree> {
+pub fn original_to_tree(node: &OriginalNode, n_leaves: u32) -> Arc<Tree> {
     if let Some(id) = node.label {
-        let mut m = FastBitSet::new(); m.set(id);
+        let mut m = FastBitSet::new(n_leaves + 2000); m.set(id);
         let h = compute_mask_hash(&m);
         Arc::new(Tree::Leaf(id, m, h))
     } else {
-        let l = original_to_tree(node.left.as_ref().unwrap());
-        let r = original_to_tree(node.right.as_ref().unwrap());
+        let l = original_to_tree(node.left.as_ref().unwrap(), n_leaves);
+        let r = original_to_tree(node.right.as_ref().unwrap(), n_leaves);
         let m = l.mask().or(r.mask());
         let h = compute_mask_hash(&m);
         let s = l.size() + r.size();
@@ -91,7 +93,7 @@ pub fn collect_cherries(tree: &Arc<Tree>, cherries: &mut HashSet<(u32, u32)>) {
 }
 
 pub fn cut_leaf(tree: &Arc<Tree>, leaf_id: u32) -> Option<Arc<Tree>> {
-    let mut target = FastBitSet::new(); target.set(leaf_id);
+    let mut target = FastBitSet::new(tree.mask().words.len() as u32 * 64); target.set(leaf_id);
     if tree.mask().and_is_zero(&target) { return Some(tree.clone()); }
     match tree.as_ref() {
         Tree::Leaf(id, _, _) => if *id == leaf_id { None } else { Some(tree.clone()) },
@@ -113,7 +115,7 @@ pub fn cut_leaf(tree: &Arc<Tree>, leaf_id: u32) -> Option<Arc<Tree>> {
 }
 
 pub fn contract_cherry(tree: &Arc<Tree>, a: u32, b: u32, new_id: u32) -> Arc<Tree> {
-    let mut target = FastBitSet::new(); target.set(a); target.set(b);
+    let mut target = FastBitSet::new(tree.mask().words.len() as u32 * 64); target.set(a); target.set(b);
     if tree.mask().and_is_zero(&target) { return tree.clone(); }
     match tree.as_ref() {
         Tree::Leaf(_, _, _) => tree.clone(),
@@ -121,7 +123,7 @@ pub fn contract_cherry(tree: &Arc<Tree>, a: u32, b: u32, new_id: u32) -> Arc<Tre
             if l.is_leaf() && r.is_leaf() {
                 let (id_l, id_r) = (l.leaf_id(), r.leaf_id());
                 if (id_l == a && id_r == b) || (id_l == b && id_r == a) {
-                    let mut m = FastBitSet::new(); m.set(new_id);
+                    let mut m = FastBitSet::new(tree.mask().words.len() as u32 * 64); m.set(new_id);
                     let h = compute_mask_hash(&m);
                     return Arc::new(Tree::Leaf(new_id, m, h));
                 }
@@ -135,6 +137,42 @@ pub fn contract_cherry(tree: &Arc<Tree>, a: u32, b: u32, new_id: u32) -> Arc<Tre
             Arc::new(Tree::Node(nl, nr, m, h, s))
         }
     }
+}
+
+pub fn path_to_leaf(tree: &Arc<Tree>, target_leaf: u32) -> Vec<(Arc<Tree>, usize)> {
+    let mut path = Vec::new();
+    let mut curr = tree.clone();
+    let mut target = FastBitSet::new(tree.mask().words.len() as u32 * 64); target.set(target_leaf);
+    while let Tree::Node(l, r, _, _, _) = curr.as_ref() {
+        if !l.mask().and_is_zero(&target) {
+            path.push((curr.clone(), 0)); curr = l.clone();
+        } else if !r.mask().and_is_zero(&target) {
+            path.push((curr.clone(), 1)); curr = r.clone();
+        } else { break; }
+    }
+    path
+}
+
+pub fn offpath_candidates(tree: &Arc<Tree>, a: u32, b: u32) -> Vec<Arc<Tree>> {
+    let path_a = path_to_leaf(tree, a);
+    let path_b = path_to_leaf(tree, b);
+    let mut i = 0;
+    while i < path_a.len() && i < path_b.len() {
+        if Arc::ptr_eq(&path_a[i].0, &path_b[i].0) && path_a[i].1 == path_b[i].1 { i += 1; }
+        else { break; }
+    }
+    let mut candidates = Vec::new();
+    for (p, side) in path_a.iter().skip(i) {
+        if let Tree::Node(l, r, _, _, _) = p.as_ref() {
+            candidates.push(if *side == 0 { r.clone() } else { l.clone() });
+        }
+    }
+    for (p, side) in path_b.iter().skip(i) {
+        if let Tree::Node(l, r, _, _, _) = p.as_ref() {
+            candidates.push(if *side == 0 { r.clone() } else { l.clone() });
+        }
+    }
+    candidates
 }
 
 pub fn get_all_leaves(tree: &Arc<Tree>) -> Vec<u32> {
