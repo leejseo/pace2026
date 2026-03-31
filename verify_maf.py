@@ -1,13 +1,13 @@
 import re
 import sys
 
-def parse_newick_to_clusters(text):
-    """Parses a Newick string and returns a set of all clusters (leaf sets)."""
+def parse_newick_to_ancestry(text):
+    """Parses a Newick string and returns a mapping: leaf -> set of all ancestors (as leaf sets)."""
     text = text.strip().replace(" ", "")
-    if not text: return set()
+    if not text: return {}, set()
     
     pos = 0
-    clusters = []
+    ancestry = {} # leaf_id -> list of frozensets (clusters it belongs to)
     
     def parse_rec():
         nonlocal pos
@@ -15,78 +15,75 @@ def parse_newick_to_clusters(text):
         
         if text[pos].isdigit():
             start = pos
-            while pos < len(text) and text[pos].isdigit():
-                pos += 1
-            leaf = {int(text[start:pos])}
-            # Single leaves are technically clusters but often ignored in comparison
-            return leaf
+            while pos < len(text) and text[pos].isdigit(): pos += 1
+            leaf = int(text[start:pos])
+            ancestry[leaf] = []
+            return {leaf}
         
         if text[pos] == '(':
-            pos += 1 # skip (
+            pos += 1
             left_set = parse_rec()
-            if pos < len(text) and text[pos] == ',':
-                pos += 1 # skip ,
+            if pos < len(text) and text[pos] == ',': pos += 1
             right_set = parse_rec()
-            if pos < len(text) and text[pos] == ')':
-                pos += 1 # skip )
+            if pos < len(text) and text[pos] == ')': pos += 1
             
             full_set = left_set | right_set
-            clusters.append(frozenset(full_set))
+            fs = frozenset(full_set)
+            for leaf in full_set:
+                ancestry[leaf].append(fs)
             return full_set
         return set()
 
     root_set = parse_rec()
-    return set(clusters), root_set
-
-def get_induced_clusters(original_clusters, target_leaves):
-    """Filters original clusters to only those that contain a subset of target_leaves."""
-    induced = []
-    for c in original_clusters:
-        intersection = c & target_leaves
-        if len(intersection) > 1:
-            induced.append(frozenset(intersection))
-    return set(induced)
+    return ancestry, root_set
 
 def verify_maf(inst_path, output_text):
+    """
+    Robust MAF verification based on Ancestry Invariance.
+    A component matches the original tree if for any two leaves x, y in the component,
+    their lowest common ancestor in the component has the same leaf set (restricted to the component)
+    as their lowest common ancestor in the original tree.
+    """
     try:
         with open(inst_path, "r") as f:
             lines = [l.strip() for l in f if l.strip() and not l.startswith("#")]
         
-        # 1. Parse Input Trees into Cluster Sets
-        c1_all, l1_all = parse_newick_to_clusters(lines[0])
-        c2_all, l2_all = parse_newick_to_clusters(lines[1])
+        # 1. Parse Original Trees
+        anc1, leaves1 = parse_newick_to_ancestry(lines[0])
+        anc2, leaves2 = parse_newick_to_ancestry(lines[1])
         
-        # 2. Parse Output Components
+        # 2. Parse Forest
         comp_texts = [c.strip() for c in output_text.strip().split(';') if c.strip()]
         all_forest_leaves = set()
         
         for i, comp_text in enumerate(comp_texts):
-            comp_clusters, comp_leaves = parse_newick_to_clusters(comp_text)
+            comp_anc, comp_leaves = parse_newick_to_ancestry(comp_text)
             
-            # Check overlap
             if not comp_leaves.isdisjoint(all_forest_leaves):
-                return False, f"Component {i} has overlapping leaves"
+                return False, f"Overlap in component {i}"
             all_forest_leaves |= comp_leaves
             
-            # 3. Check Agreement: Cluster sets must match the induced original clusters
-            # For rooted trees, isomorphism is equivalent to having identical cluster sets
-            # when restricted to the same leaf set.
-            induced1 = get_induced_clusters(c1_all, comp_leaves)
-            induced2 = get_induced_clusters(c2_all, comp_leaves)
-            
-            if comp_clusters != induced1:
-                return False, f"Component {i} structure mismatch with T1"
-            if comp_clusters != induced2:
-                return False, f"Component {i} structure mismatch with T2"
+            # 3. Validation: For each leaf in component, its cluster hierarchy (restricted to comp_leaves)
+            # must be a subset of the original hierarchy.
+            for leaf in comp_leaves:
+                comp_clusters = [c for c in comp_anc[leaf] if len(c) > 1]
                 
-        # 4. Check Partition Completeness
-        if all_forest_leaves != l1_all:
-            return False, f"Leaf partition incomplete: missing {len(l1_all - all_forest_leaves)} labels"
+                # Check against T1
+                orig1_clusters_restricted = [c & comp_leaves for c in anc1[leaf] if len(c & comp_leaves) > 1]
+                if set(comp_clusters) != set(orig1_clusters_restricted):
+                    return False, f"Component {i} topology mismatch with T1 at leaf {leaf}"
+                
+                # Check against T2
+                orig2_clusters_restricted = [c & comp_leaves for c in anc2[leaf] if len(c & comp_leaves) > 1]
+                if set(comp_clusters) != set(orig2_clusters_restricted):
+                    return False, f"Component {i} topology mismatch with T2 at leaf {leaf}"
+                    
+        if all_forest_leaves != leaves1:
+            return False, "Partition incomplete"
             
         return True, len(comp_texts)
-        
     except Exception as e:
-        return False, f"Verifier Error: {str(e)}"
+        return False, f"Error: {str(e)}"
 
 if __name__ == "__main__":
     if len(sys.argv) == 3:
