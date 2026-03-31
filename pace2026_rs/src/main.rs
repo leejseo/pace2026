@@ -3,7 +3,7 @@ mod state;
 mod io;
 
 use std::collections::{HashMap, HashSet};
-use crate::tree::{Tree, Expansion, original_to_tree, collect_cherries, cut_leaf, get_all_leaves, OriginalNode, FastBitSet};
+use crate::tree::{Tree, Expansion, original_to_tree, collect_cherries, cut_leaf, offpath_candidates, get_all_leaves, OriginalNode, FastBitSet};
 use crate::state::{State, normalize_state};
 use crate::io::{parse_instance_file, render_expansion};
 use anyhow::Result;
@@ -46,29 +46,34 @@ fn run(time_limit: u64) -> Result<()> {
     Ok(())
 }
 
-fn are_isomorphic(n1: &Expansion, n2: &Expansion) -> bool {
-    n1 == n2
-}
+fn are_isomorphic(n1: &Expansion, n2: &Expansion) -> bool { n1 == n2 }
 
 fn build_induced_expansion(node: &OriginalNode, leaves: &HashSet<u32>) -> Option<Expansion> {
     if let Some(id) = node.label { return if leaves.contains(&id) { Some(Expansion::Leaf(id)) } else { None }; }
     let l = build_induced_expansion(node.left.as_ref().unwrap(), leaves);
     let r = build_induced_expansion(node.right.as_ref().unwrap(), leaves);
-    match (l, r) { 
-        (Some(tl), Some(tr)) => Some(Expansion::new_node(tl, tr)), 
-        (Some(t), None) | (None, Some(t)) => Some(t), 
-        (None, None) => None 
-    }
+    match (l, r) { (Some(tl), Some(tr)) => Some(Expansion::new_node(tl, tr)), (Some(t), None) | (None, Some(t)) => Some(t), (None, None) => None }
 }
 
-fn get_conflict_candidates(state: &State) -> Vec<u32> {
+fn get_conflict_batch(state: &State, size: usize) -> Vec<u32> {
     let mut c1 = HashSet::new(); collect_cherries(&state.tree1, &mut c1);
     let mut c2 = HashSet::new(); collect_cherries(&state.tree2, &mut c2);
     let diff1: Vec<_> = c1.difference(&c2).collect();
     let diff2: Vec<_> = c2.difference(&c1).collect();
     let mut rng = rand::rng();
-    if let Some(&(a, b)) = diff1.choose(&mut rng).or(diff2.choose(&mut rng)) { return vec![*a, *b]; }
-    get_all_leaves(&state.tree1)
+    let mut batch = HashSet::new();
+    
+    // Pick multiple conflicting cherries to speed up the process
+    let mut combined_diff: Vec<_> = diff1.into_iter().chain(diff2.into_iter()).collect();
+    combined_diff.shuffle(&mut rng);
+    
+    for cherry in combined_diff.iter().take(size) {
+        batch.insert(cherry.0);
+        batch.insert(cherry.1);
+    }
+    
+    if batch.is_empty() { return get_all_leaves(&state.tree1).into_iter().take(size).collect(); }
+    batch.into_iter().collect()
 }
 
 fn solve_partition(t1: Arc<Tree>, t2: Arc<Tree>, n_leaves: u32, limit_seconds: u64, ot1: &OriginalNode, ot2: &OriginalNode) -> Vec<HashSet<u32>> {
@@ -86,50 +91,23 @@ fn solve_partition(t1: Arc<Tree>, t2: Arc<Tree>, n_leaves: u32, limit_seconds: u
             let mut curr = start_state.clone();
             let mut p = Vec::new();
             
-            if rng.random_bool(0.4) {
-                let current_best = best_partition.lock().unwrap().clone();
-                if !current_best.is_empty() {
-                    let mut shaken = current_best; shaken.shuffle(&mut rng);
-                    let keep_count = rng.random_range(1..shaken.len() / 2 + 1);
-                    let mut to_keep = Vec::new();
-                    let mut kept_leaves = HashSet::new();
-                    for s in shaken.drain(0..keep_count) {
-                        for &l in &s { kept_leaves.insert(l); }
-                        to_keep.push(s);
-                    }
-                    let mut remaining_leaves = HashSet::new();
-                    for i in 1..=n_leaves { if !kept_leaves.contains(&i) { remaining_leaves.insert(i); } }
-                    
-                    if let (Some(nt1_exp), Some(nt2_exp)) = (build_induced_expansion(ot1, &remaining_leaves), build_induced_expansion(ot2, &remaining_leaves)) {
-                        fn exp_to_tree(e: &Expansion, n_leaves: u32) -> Arc<Tree> {
-                            match e { Expansion::Leaf(id) => {
-                                let mut m = FastBitSet::new(n_leaves + 2000); m.set(*id);
-                                let mut hasher = std::collections::hash_map::DefaultHasher::new();
-                                m.words.hash(&mut hasher);
-                                Arc::new(Tree::Leaf(*id, m, hasher.finish()))
-                            }, Expansion::Node(l, r, _) => { 
-                                let tl = exp_to_tree(l, n_leaves); 
-                                let tr = exp_to_tree(r, n_leaves);
-                                let m = tl.mask().or(tr.mask());
-                                let mut hasher = std::collections::hash_map::DefaultHasher::new();
-                                m.words.hash(&mut hasher);
-                                Arc::new(Tree::Node(tl.clone(), tr.clone(), m, hasher.finish(), tl.size() + tr.size())) } }
-                        }
-                        curr = normalize_state(State { tree1: exp_to_tree(&nt1_exp, n_leaves), tree2: exp_to_tree(&nt2_exp, n_leaves), expansions: start_state.expansions.clone(), next_id: start_state.next_id, cut_components: Vec::new(), cached_score: (0, 0, 0) });
-                        p = to_keep;
-                    }
-                }
-            }
-
+            // Fast Anytime Loop with Batching
             while !curr.tree1.is_leaf() && Instant::now() < deadline {
-                let candidates = get_conflict_candidates(&curr);
-                let &leaf_id = candidates.choose(&mut rng).unwrap();
-                let next_t1 = cut_leaf(&curr.tree1, leaf_id);
-                let next_t2 = cut_leaf(&curr.tree2, leaf_id);
-                let mut next_nc = curr.cut_components.clone();
-                next_nc.push(curr.expansions.get(&leaf_id).cloned().unwrap_or(Expansion::Leaf(leaf_id)));
-                let m_size = curr.tree1.mask().words.len() as u32 * 64;
-                curr = normalize_state(State { tree1: next_t1.unwrap_or(Arc::new(Tree::Leaf(0, FastBitSet::new(m_size), 0))), tree2: next_t2.unwrap_or(Arc::new(Tree::Leaf(0, FastBitSet::new(m_size), 0))), expansions: curr.expansions.clone(), next_id: curr.next_id, cut_components: next_nc, cached_score: (0, 0, 0) });
+                // Cut 10 leaves at once in large instances to speed up
+                let batch_size = if curr.tree1.size() > 1000 { 20 } else { 1 };
+                let to_cut = get_conflict_batch(&curr, batch_size);
+                
+                let mut nt1 = curr.tree1.clone();
+                let mut nt2 = curr.tree2.clone();
+                let mut nnc = curr.cut_components.clone();
+                
+                for leaf_id in to_cut {
+                    if let Some(t) = cut_leaf(&nt1, leaf_id) { nt1 = t; }
+                    if let Some(t) = cut_leaf(&nt2, leaf_id) { nt2 = t; }
+                    nnc.push(curr.expansions.get(&leaf_id).cloned().unwrap_or(Expansion::Leaf(leaf_id)));
+                }
+                
+                curr = normalize_state(State { tree1: nt1, tree2: nt2, expansions: curr.expansions.clone(), next_id: curr.next_id, cut_components: nnc, cached_score: (0, 0, 0) });
             }
             
             if curr.tree1.is_leaf() {
@@ -162,7 +140,7 @@ fn merge_partitions(mut p: Vec<HashSet<u32>>, ot1: &OriginalNode, ot2: &Original
         while i < p.len() {
             let mut j = i + 1;
             while j < p.len() {
-                if p.len() > 150 && (p[i].len() > 100 || p[j].len() > 100) { j += 1; continue; }
+                if p.len() > 200 && (p[i].len() > 100 || p[j].len() > 100) { j += 1; continue; }
                 let mut merged = p[i].clone();
                 merged.extend(&p[j]);
                 if let (Some(e1), Some(e2)) = (build_induced_expansion(ot1, &merged), build_induced_expansion(ot2, &merged)) {
@@ -179,9 +157,6 @@ fn merge_partitions(mut p: Vec<HashSet<u32>>, ot1: &OriginalNode, ot2: &Original
 fn collect_leaves(exp: &Expansion, set: &mut HashSet<u32>) {
     let mut stack = vec![exp];
     while let Some(e) = stack.pop() {
-        match e { 
-            Expansion::Leaf(id) => { set.insert(*id); } 
-            Expansion::Node(l, r, _) => { stack.push(l); stack.push(r); } 
-        }
+        match e { Expansion::Leaf(id) => { set.insert(*id); } Expansion::Node(l, r, _) => { stack.push(l); stack.push(r); } }
     }
 }

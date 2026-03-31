@@ -62,3 +62,10 @@
 | heuristic28.nw | TO | TO | TO | TO |
 | heuristic26.nw | TO | TO | TO | TO |
 | heuristic98.nw | TO | TO | TO | TO |
+
+### Hard Benchmark Run 20260331_225805
+| Instance | 1m | 2m | 3m | 5m |
+| --- | --- | --- | --- | --- |
+| heuristic28.nw | TO | TO | TO | TO |
+| heuristic26.nw | TO | TO | TO | TO |
+| heuristic98.nw | TO | TO | TO | TO |
