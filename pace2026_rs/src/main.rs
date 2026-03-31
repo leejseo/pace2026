@@ -3,7 +3,7 @@ mod state;
 mod io;
 
 use std::collections::{HashMap, HashSet};
-use crate::tree::{Tree, Expansion, original_to_tree, collect_cherries, cut_leaf, offpath_candidates, get_all_leaves, OriginalNode};
+use crate::tree::{Tree, Expansion, original_to_tree, collect_cherries, cut_leaf, get_all_leaves};
 use crate::state::{State, normalize_state};
 use crate::io::{parse_instance_file, render_expansion};
 use anyhow::Result;
@@ -12,7 +12,6 @@ use rayon::prelude::*;
 use std::sync::{Arc, Mutex};
 use num_traits::Zero;
 use rand::prelude::*;
-use num_bigint::BigUint;
 
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
@@ -40,20 +39,12 @@ fn run(time_limit: u64) -> Result<()> {
     let instance = parse_instance_file(input_path)?;
     let t1 = original_to_tree(&instance.tree1);
     let t2 = original_to_tree(&instance.tree2);
-    let components = solve_anytime(t1, t2, instance.n_leaves, time_limit, &instance.tree1, &instance.tree2);
+    let components = solve_anytime(t1, t2, instance.n_leaves, time_limit);
     for c in components { println!("{};", render_expansion(&c)); }
     Ok(())
 }
 
-fn is_cluster_in_tree(tree: &Arc<Tree>, mask: &BigUint) -> bool {
-    if tree.mask() == mask { return true; }
-    match tree.as_ref() {
-        Tree::Leaf(_, _) => false,
-        Tree::Node(l, r, _, _) => is_cluster_in_tree(l, mask) || is_cluster_in_tree(r, mask),
-    }
-}
-
-fn solve_anytime(tree1: Arc<Tree>, tree2: Arc<Tree>, n_leaves: u32, limit_seconds: u64, original_t1: &OriginalNode, original_t2: &OriginalNode) -> Vec<Expansion> {
+fn solve_anytime(tree1: Arc<Tree>, tree2: Arc<Tree>, n_leaves: u32, limit_seconds: u64) -> Vec<Expansion> {
     let start_time = Instant::now();
     let deadline = start_time + Duration::from_secs(limit_seconds);
     let mut expansions = HashMap::new();
@@ -64,24 +55,14 @@ fn solve_anytime(tree1: Arc<Tree>, tree2: Arc<Tree>, n_leaves: u32, limit_second
         next_id: n_leaves + 1, cut_components: Vec::new(), cached_score: (0, 0, 0),
     });
 
-    let initial_ans = greedy_rollout(&start_state, deadline).unwrap_or_else(|| {
-        (1..=n_leaves).map(Expansion::Leaf).collect()
-    });
+    let initial_ans = (1..=n_leaves).map(Expansion::Leaf).collect();
     let best_ans = Arc::new(Mutex::new(initial_ans));
-    let best_count = Arc::new(Mutex::new(best_ans.lock().unwrap().len()));
+    let best_count = Arc::new(Mutex::new(n_leaves as usize));
 
-    let beam_deadline = start_time + Duration::from_secs(limit_seconds / 5);
-    let beam_results = solve_beam_anytime(&start_state, beam_deadline, &best_ans, &best_count);
-
-    (0..rayon::current_num_threads()).into_par_iter().for_each(|i| {
+    (0..rayon::current_num_threads()).into_par_iter().for_each(|_| {
         let mut rng = rand::rng();
         while Instant::now() < deadline {
-            let seed_state = if !beam_results.is_empty() && rng.random_bool(0.5) {
-                beam_results[i % beam_results.len()].clone()
-            } else {
-                start_state.clone()
-            };
-            solve_sa_anytime(&seed_state, deadline, &best_ans, &best_count);
+            solve_sa_anytime(&start_state, deadline, &best_ans, &best_count);
         }
     });
 
@@ -90,160 +71,40 @@ fn solve_anytime(tree1: Arc<Tree>, tree2: Arc<Tree>, n_leaves: u32, limit_second
 
 fn solve_sa_anytime(start_state: &State, deadline: Instant, best_ans: &Arc<Mutex<Vec<Expansion>>>, best_count: &Arc<Mutex<usize>>) {
     let mut rng = rand::rng();
-    let mut current_state = start_state.clone();
+    let mut curr = start_state.clone();
     let mut t = 1.0f64;
-    let cooling = 0.99998f64;
     
-    while Instant::now() < deadline {
-        let current_best_count = *best_count.lock().unwrap();
-        let candidates = get_candidates(&current_state);
-        if candidates.is_empty() { current_state = start_state.clone(); continue; }
+    while Instant::now() < deadline && !curr.tree1.is_leaf() {
+        let current_best = *best_count.lock().unwrap();
+        let leaves = get_all_leaves(&curr.tree1);
+        if leaves.is_empty() { break; }
         
-        let (ids, exp) = candidates.choose(&mut rng).unwrap().clone();
-        let next_state = cut_and_normalize(&current_state, &ids, exp);
-        let next_score = next_state.cached_score.0;
+        let &leaf_id = leaves.choose(&mut rng).unwrap();
+        let mut next_t1 = cut_leaf(&curr.tree1, leaf_id);
+        let mut next_t2 = cut_leaf(&curr.tree2, leaf_id);
+        let mut next_comps = curr.cut_components.clone();
+        next_comps.push(curr.expansions.get(&leaf_id).cloned().unwrap_or(Expansion::Leaf(leaf_id)));
         
-        if next_score <= current_best_count + 1 {
-            if let Some(rollout_ans) = greedy_rollout(&next_state, deadline) {
-                let rollout_count = rollout_ans.len();
-                if rollout_count < current_best_count {
-                    let mut bc = best_count.lock().unwrap();
-                    if rollout_count < *bc {
-                        *bc = rollout_count;
-                        *best_ans.lock().unwrap() = rollout_ans;
-                    }
-                    current_state = next_state;
-                } else if ((-( (rollout_count - current_best_count) as f64) / t).exp()) > rng.random::<f64>() {
-                    current_state = next_state;
-                }
-            }
-        } else if ((-( (next_score - current_best_count) as f64) / t).exp()) > rng.random::<f64>() {
-            current_state = next_state;
-        }
-        t *= cooling;
-        if t < 0.05 { t = 1.0; }
-    }
-}
+        let next_state = normalize_state(State {
+            tree1: next_t1.unwrap_or(Arc::new(Tree::Leaf(0, Zero::zero()))),
+            tree2: next_t2.unwrap_or(Arc::new(Tree::Leaf(0, Zero::zero()))),
+            expansions: curr.expansions.clone(),
+            next_id: curr.next_id,
+            cut_components: next_comps,
+            cached_score: (0, 0, 0),
+        });
 
-fn get_candidates(state: &State) -> Vec<(Vec<u32>, Option<Expansion>)> {
-    let mut c1 = HashSet::new();
-    collect_cherries(&state.tree1, &mut c1);
-    let mut c2 = HashSet::new();
-    collect_cherries(&state.tree2, &mut c2);
-    
-    let mut candidates = Vec::new();
-    let mut rng = rand::rng();
-    let diff1: Vec<_> = c1.difference(&c2).collect();
-    let diff2: Vec<_> = c2.difference(&c1).collect();
-    
-    for _ in 0..5 {
-        if let Some(&(a, b)) = diff1.choose(&mut rng) {
-            candidates.push((vec![*a], None));
-            candidates.push((vec![*b], None));
-            for sub in offpath_candidates(&state.tree2, *a, *b) {
-                // IMPORTANT: Only cut as a subtree if it's a cluster in BOTH trees
-                if is_cluster_in_tree(&state.tree1, sub.mask()) {
-                    candidates.push((get_all_leaves(&sub), Some(build_sub_expansion_simple(&sub, &state.expansions))));
-                } else {
-                    // Otherwise, just cut the individual leaves
-                    for leaf in get_all_leaves(&sub) { candidates.push((vec![leaf], None)); }
-                }
-            }
-        }
-        if let Some(&(a, b)) = diff2.choose(&mut rng) {
-            candidates.push((vec![*a], None));
-            candidates.push((vec![*b], None));
-            for sub in offpath_candidates(&state.tree1, *a, *b) {
-                if is_cluster_in_tree(&state.tree2, sub.mask()) {
-                    candidates.push((get_all_leaves(&sub), Some(build_sub_expansion_simple(&sub, &state.expansions))));
-                } else {
-                    for leaf in get_all_leaves(&sub) { candidates.push((vec![leaf], None)); }
-                }
-            }
-        }
-    }
-    if candidates.is_empty() {
-        let all = get_all_leaves(&state.tree1);
-        for &leaf in all.iter().take(15) { candidates.push((vec![leaf], None)); }
-    }
-    candidates.truncate(40);
-    candidates
-}
-
-fn solve_beam_anytime(start_state: &State, deadline: Instant, best_ans: &Arc<Mutex<Vec<Expansion>>>, best_count: &Arc<Mutex<usize>>) -> Vec<State> {
-    let mut beam = vec![start_state.clone()];
-    let mut promising = Vec::new();
-    while !beam.is_empty() && Instant::now() < deadline {
-        let current_best_count = *best_count.lock().unwrap();
-        let next_states: Vec<State> = beam.par_iter().flat_map(|state| {
-            if state.tree1.is_leaf() && state.tree2.is_leaf() { return vec![]; }
-            if state.cut_components.len() >= current_best_count { return vec![]; }
-            get_candidates(state).into_iter().map(|(ids, exp)| cut_and_normalize(state, &ids, exp)).collect::<Vec<State>>()
-        }).collect();
-        for state in &next_states {
-            if state.tree1.is_leaf() && state.tree2.is_leaf() {
-                let mut ans = state.cut_components.clone();
-                let rid = state.tree1.leaf_id();
-                ans.push(state.expansions.get(&rid).cloned().unwrap_or(Expansion::Leaf(rid)));
+        let score = next_state.cut_components.len() + next_state.tree1.size();
+        if score < current_best + 5 {
+            if next_state.tree1.is_leaf() && next_state.tree2.is_leaf() {
+                let mut ans = next_state.cut_components.clone();
+                let rid = next_state.tree1.leaf_id();
+                ans.push(next_state.expansions.get(&rid).cloned().unwrap_or(Expansion::Leaf(rid)));
                 let mut bc = best_count.lock().unwrap();
                 if ans.len() < *bc { *bc = ans.len(); *best_ans.lock().unwrap() = ans; }
             }
+            curr = next_state;
         }
-        if next_states.is_empty() { break; }
-        let mut sorted = next_states;
-        sorted.sort_unstable_by_key(|s| s.cached_score);
-        let mut unique = Vec::new();
-        let mut seen = HashSet::new();
-        for s in sorted {
-            let key = (s.tree1.mask().clone(), s.tree2.mask().clone());
-            if !seen.contains(&key) { seen.insert(key); unique.push(s); }
-            if unique.len() >= 100 { break; }
-        }
-        beam = unique.clone();
-        promising.extend(unique.into_iter().take(5));
-        if promising.len() > 100 { promising.drain(0..5); }
+        t *= 0.9999;
     }
-    promising
-}
-
-fn build_sub_expansion_simple(tree: &Arc<Tree>, expansions: &HashMap<u32, Expansion>) -> Expansion {
-    match tree.as_ref() {
-        Tree::Leaf(id, _) => expansions.get(id).cloned().unwrap_or(Expansion::Leaf(*id)),
-        Tree::Node(l, r, _, _) => Expansion::Node(Box::new(build_sub_expansion_simple(l, expansions)), Box::new(build_sub_expansion_simple(r, expansions)))
-    }
-}
-
-fn cut_and_normalize(state: &State, block_ids: &[u32], subtree_exp: Option<Expansion>) -> State {
-    let mut nt1 = state.tree1.clone();
-    let mut nt2 = state.tree2.clone();
-    let mut nc = state.cut_components.clone();
-    if let Some(exp) = subtree_exp {
-        for &id in block_ids {
-            if let Some(t) = cut_leaf(&nt1, id) { nt1 = t; }
-            if let Some(t) = cut_leaf(&nt2, id) { nt2 = t; }
-        }
-        nc.push(exp);
-    } else {
-        for &id in block_ids {
-            if let Some(t) = cut_leaf(&nt1, id) { nt1 = t; }
-            if let Some(t) = cut_leaf(&nt2, id) { nt2 = t; }
-            nc.push(state.expansions.get(&id).cloned().unwrap_or(Expansion::Leaf(id)));
-        }
-    }
-    normalize_state(State { tree1: nt1, tree2: nt2, expansions: state.expansions.clone(), next_id: state.next_id, cut_components: nc, cached_score: (0, 0, 0) })
-}
-
-fn greedy_rollout(state: &State, deadline: Instant) -> Option<Vec<Expansion>> {
-    let mut curr = state.clone();
-    while !curr.tree1.is_leaf() && Instant::now() < deadline {
-        let cands = get_candidates(&curr);
-        if cands.is_empty() { break; }
-        let (ids, exp) = cands[0].clone();
-        curr = cut_and_normalize(&curr, &ids, exp);
-    }
-    if !curr.tree1.is_leaf() || !curr.tree2.is_leaf() { return None; }
-    let mut ans = curr.cut_components.clone();
-    let rid = curr.tree1.leaf_id();
-    ans.push(curr.expansions.get(&rid).cloned().unwrap_or(Expansion::Leaf(rid)));
-    Some(ans)
 }
