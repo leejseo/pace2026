@@ -38,10 +38,24 @@ pub struct OriginalNode {
     pub label: Option<u32>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, PartialEq, Hash)]
 pub enum Expansion {
     Leaf(u32),
-    Node(Box<Expansion>, Box<Expansion>),
+    Node(Box<Expansion>, Box<Expansion>, u64),
+}
+
+impl Expansion {
+    pub fn hash_val(&self) -> u64 {
+        match self { Expansion::Leaf(id) => *id as u64, Expansion::Node(_, _, h) => *h }
+    }
+    pub fn new_node(l: Expansion, r: Expansion) -> Self {
+        let h1 = l.hash_val();
+        let h2 = r.hash_val();
+        let mut h = DefaultHasher::new();
+        if h1 < h2 { h1.hash(&mut h); h2.hash(&mut h); }
+        else { h2.hash(&mut h); h1.hash(&mut h); }
+        Expansion::Node(Box::new(l), Box::new(r), h.finish())
+    }
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]

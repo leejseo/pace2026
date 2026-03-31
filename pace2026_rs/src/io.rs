@@ -84,6 +84,6 @@ pub fn parse_instance_file(path: &str) -> Result<Instance> {
 pub fn render_expansion(exp: &crate::tree::Expansion) -> String {
     match exp {
         crate::tree::Expansion::Leaf(id) => id.to_string(),
-        crate::tree::Expansion::Node(l, r) => format!("({},{})", render_expansion(l), render_expansion(r)),
+        crate::tree::Expansion::Node(l, r, _) => format!("({},{})", render_expansion(l), render_expansion(r)),
     }
 }
