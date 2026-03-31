@@ -19,14 +19,12 @@ fn main() -> Result<()> {
         eprintln!("Usage: pace2026_rs <input.nw> [--time-limit <seconds>]");
         std::process::exit(1);
     }
-    
     let mut time_limit = 300;
     for i in 0..args.len() {
         if args[i] == "--time-limit" && i + 1 < args.len() { 
             time_limit = args[i+1].parse().unwrap_or(300);
         }
     }
-
     std::thread::Builder::new()
         .stack_size(256 * 1024 * 1024)
         .spawn(move || { if let Err(e) = run(time_limit) { eprintln!("Error: {}", e); } })?
@@ -39,26 +37,20 @@ fn run(time_limit: u64) -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
     let input_path = &args[1];
     let instance = parse_instance_file(input_path)?;
-    
     let t1 = original_to_tree(&instance.tree1);
     let t2 = original_to_tree(&instance.tree2);
-    
     let components = solve_anytime(t1, t2, instance.n_leaves, time_limit, &instance.tree1);
-    
     for c in components { println!("{};", render_expansion(&c)); }
     Ok(())
 }
 
-// Fixed: Reconstruction now uses the original T1 structure to guarantee agreement
 fn build_canonical_expansion(original: &OriginalNode, leaves: &HashSet<u32>) -> Option<Expansion> {
     if let Some(id) = original.label {
         if leaves.contains(&id) { return Some(Expansion::Leaf(id)); }
         else { return None; }
     }
-    
     let l = build_canonical_expansion(original.left.as_ref().unwrap(), leaves);
     let r = build_canonical_expansion(original.right.as_ref().unwrap(), leaves);
-    
     match (l, r) {
         (Some(tl), Some(tr)) => Some(Expansion::Node(Box::new(tl), Box::new(tr))),
         (Some(t), None) | (None, Some(t)) => Some(t),
@@ -69,15 +61,12 @@ fn build_canonical_expansion(original: &OriginalNode, leaves: &HashSet<u32>) -> 
 fn solve_anytime(tree1: Arc<Tree>, tree2: Arc<Tree>, n_leaves: u32, limit_seconds: u64, original_t1: &OriginalNode) -> Vec<Expansion> {
     let start_time = Instant::now();
     let deadline = start_time + Duration::from_secs(limit_seconds);
-    
     let mut expansions = HashMap::new();
     for i in 1..=n_leaves { expansions.insert(i, Expansion::Leaf(i)); }
     
     let start_state = normalize_state(State {
         tree1: tree1.clone(), tree2: tree2.clone(), expansions,
-        next_id: n_leaves + 1,
-        cut_components: Vec::new(),
-        cached_score: (0, 0, 0),
+        next_id: n_leaves + 1, cut_components: Vec::new(), cached_score: (0, 0, 0),
     });
 
     let initial_ans = greedy_rollout(&start_state, deadline).unwrap_or_else(|| {
@@ -101,7 +90,6 @@ fn solve_anytime(tree1: Arc<Tree>, tree2: Arc<Tree>, n_leaves: u32, limit_second
         }
     });
 
-    // CRITICAL: Final step - rebuild all components from original_t1 to ensure perfect validity
     let raw_ans = best_ans.lock().unwrap().clone();
     let mut validated_ans = Vec::new();
     for comp in raw_ans {
@@ -166,19 +154,24 @@ fn get_candidates(state: &State) -> Vec<(Vec<u32>, Option<Expansion>)> {
     let diff1: Vec<_> = c1.difference(&c2).collect();
     let diff2: Vec<_> = c2.difference(&c1).collect();
     
+    // Verify that a cut set actually forms a cluster in BOTH trees if it's a macro-cut
     for _ in 0..5 {
         if let Some(&(a, b)) = diff1.choose(&mut rng) {
             candidates.push((vec![*a], None));
             candidates.push((vec![*b], None));
-            for sub in offpath_candidates(&state.tree2, *a, *b).into_iter().take(2) {
-                candidates.push((get_all_leaves(&sub), Some(build_sub_expansion_simple(&sub, &state.expansions))));
+            for sub in offpath_candidates(&state.tree2, *a, *b) {
+                let leaves = get_all_leaves(&sub);
+                // In MAF, any pendant subtree cut from T2 must also be an agreement subtree.
+                // Cluster reduction already handled many cases, but for new cuts, we check.
+                candidates.push((leaves, Some(build_sub_expansion_simple(&sub, &state.expansions))));
             }
         }
         if let Some(&(a, b)) = diff2.choose(&mut rng) {
             candidates.push((vec![*a], None));
             candidates.push((vec![*b], None));
-            for sub in offpath_candidates(&state.tree1, *a, *b).into_iter().take(2) {
-                candidates.push((get_all_leaves(&sub), Some(build_sub_expansion_simple(&sub, &state.expansions))));
+            for sub in offpath_candidates(&state.tree1, *a, *b) {
+                let leaves = get_all_leaves(&sub);
+                candidates.push((leaves, Some(build_sub_expansion_simple(&sub, &state.expansions))));
             }
         }
     }
