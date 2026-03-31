@@ -20,7 +20,6 @@ fn main() -> Result<()> {
         std::process::exit(1);
     }
     
-    // PACE usually gives 10 mins, but user requested 5 mins (300s)
     let mut time_limit = 300;
     for i in 0..args.len() {
         if args[i] == "--time-limit" && i + 1 < args.len() { 
@@ -29,7 +28,7 @@ fn main() -> Result<()> {
     }
 
     std::thread::Builder::new()
-        .stack_size(256 * 1024 * 1024) // 256MB for 100k leaves
+        .stack_size(256 * 1024 * 1024)
         .spawn(move || { if let Err(e) = run(time_limit) { eprintln!("Error: {}", e); } })?
         .join()
         .expect("Thread failed");
@@ -64,29 +63,24 @@ fn solve_anytime(tree1: Arc<Tree>, tree2: Arc<Tree>, n_leaves: u32, limit_second
         cached_score: (0, 0, 0),
     });
 
-    // 1. Initial Quick Solution
-    let mut initial_ans = greedy_rollout(&start_state, deadline).unwrap_or_else(|| {
+    let initial_ans = greedy_rollout(&start_state, deadline).unwrap_or_else(|| {
         (1..=n_leaves).map(Expansion::Leaf).collect()
     });
     let best_ans = Arc::new(Mutex::new(initial_ans));
     let best_count = Arc::new(Mutex::new(best_ans.lock().unwrap().len()));
 
-    // 2. Wide Beam Search (Exploration Phase - First 20% of time)
     let beam_deadline = start_time + Duration::from_secs(limit_seconds / 5);
     let beam_results = solve_beam_anytime(&start_state, beam_deadline, &best_ans, &best_count);
 
-    // 3. Parallel Simulated Annealing (Exploitation Phase - Remaining 80% of time)
-    let sa_results: Vec<_> = (0..rayon::current_num_threads()).into_par_iter().map(|i| {
-        // Each thread starts SA from a different promising state found by Beam Search
+    (0..rayon::current_num_threads()).into_par_iter().for_each(|i| {
         let seed_state = if !beam_results.is_empty() {
             &beam_results[i % beam_results.len()]
         } else {
             &start_state
         };
-        solve_sa_anytime(seed_state, deadline, &best_ans, &best_count)
-    }).collect();
+        solve_sa_anytime(seed_state, deadline, &best_ans, &best_count);
+    });
 
-    // Final result is already stored in best_ans via the Mutex
     let final_ans = best_ans.lock().unwrap().clone();
     final_ans
 }
@@ -131,11 +125,11 @@ fn solve_beam_anytime(start_state: &State, deadline: Instant, best_ans: &Arc<Mut
             if !seen.contains(&key) {
                 seen.insert(key); unique.push(s);
             }
-            if unique.len() >= 100 { break; } // Very wide beam
+            if unique.len() >= 100 { break; }
         }
         beam = unique.clone();
         promising_states.extend(unique.into_iter().take(10));
-        if promising_states.len() > 50 { promising_states.drain(0..10); }
+        if promising_states.len() > 100 { promising_states.drain(0..10); }
     }
     promising_states
 }
@@ -144,7 +138,7 @@ fn solve_sa_anytime(start_state: &State, deadline: Instant, best_ans: &Arc<Mutex
     let mut rng = rand::rng();
     let mut current_state = start_state.clone();
     let mut t = 1.0f64;
-    let cooling = 0.9999f64;
+    let cooling = 0.99995f64;
     
     while Instant::now() < deadline {
         let current_best_count = *best_count.lock().unwrap();
@@ -157,38 +151,34 @@ fn solve_sa_anytime(start_state: &State, deadline: Instant, best_ans: &Arc<Mutex
         let (ids, exp) = candidates.choose(&mut rng).unwrap().clone();
         let next_state = cut_and_normalize(&current_state, &ids, exp);
         
-        if let Some(rollout_ans) = greedy_rollout(&next_state, deadline) {
-            let rollout_count = rollout_ans.len();
-            
-            if rollout_count < current_best_count {
-                let mut bc = best_count.lock().unwrap();
-                if rollout_count < *bc {
-                    *bc = rollout_count;
-                    *best_ans.lock().unwrap() = rollout_ans;
-                }
-                current_state = next_state;
-            } else {
-                let diff = (rollout_count - current_best_count) as f64;
-                if ((-diff / t).exp()) > rng.random::<f64>() {
+        let next_score = next_state.cached_score.0;
+        
+        if next_score <= current_best_count + 2 {
+            if let Some(rollout_ans) = greedy_rollout(&next_state, deadline) {
+                let rollout_count = rollout_ans.len();
+                if rollout_count < current_best_count {
+                    let mut bc = best_count.lock().unwrap();
+                    if rollout_count < *bc {
+                        *bc = rollout_count;
+                        *best_ans.lock().unwrap() = rollout_ans;
+                    }
+                    current_state = next_state;
+                } else if ((-( (rollout_count - current_best_count) as f64) / t).exp()) > rng.random::<f64>() {
                     current_state = next_state;
                 }
             }
+        } else if ((-( (next_score - current_best_count) as f64) / t).exp()) > rng.random::<f64>() {
+            current_state = next_state;
         }
         
         t *= cooling;
-        // Reheating
         if t < 0.01 { 
             t = 1.0; 
-            let start_cands = get_candidates(start_state);
-            if !start_cands.is_empty() {
-                let (ids, exp) = start_cands.choose(&mut rng).unwrap().clone();
-                current_state = cut_and_normalize(start_state, &ids, exp);
-            }
+            current_state = start_state.clone(); 
         }
     }
 }
 
-// Reuse existing helper functions (get_candidates, cut_and_normalize, etc.)
 fn build_sub_expansion(tree: &Arc<Tree>, expansions: &HashMap<u32, Expansion>) -> Expansion {
     match tree.as_ref() {
         Tree::Leaf(id, _) => expansions.get(id).cloned().unwrap_or(Expansion::Leaf(*id)),
@@ -229,27 +219,27 @@ fn get_candidates(state: &State) -> Vec<(Vec<u32>, Option<Expansion>)> {
 }
 
 fn cut_and_normalize(state: &State, block_ids: &[u32], subtree_exp: Option<Expansion>) -> State {
-    let mut next_t1 = Some(state.tree1.clone());
-    let mut next_t2 = Some(state.tree2.clone());
+    let mut next_t1 = state.tree1.clone();
+    let mut next_t2 = state.tree2.clone();
     let mut next_comps = state.cut_components.clone();
     
     if let Some(exp) = subtree_exp {
         for &id in block_ids {
-            if let Some(t) = next_t1 { next_t1 = cut_leaf(&t, id); }
-            if let Some(t) = next_t2 { next_t2 = cut_leaf(&t, id); }
+            if let Some(t) = cut_leaf(&next_t1, id) { next_t1 = t; }
+            if let Some(t) = cut_leaf(&next_t2, id) { next_t2 = t; }
         }
         next_comps.push(exp);
     } else {
         for &id in block_ids {
-            if let Some(t) = next_t1 { next_t1 = cut_leaf(&t, id); }
-            if let Some(t) = next_t2 { next_t2 = cut_leaf(&t, id); }
+            if let Some(t) = cut_leaf(&next_t1, id) { next_t1 = t; }
+            if let Some(t) = cut_leaf(&next_t2, id) { next_t2 = t; }
             if let Some(exp) = state.expansions.get(&id) { next_comps.push(exp.clone()); }
             else { next_comps.push(Expansion::Leaf(id)); }
         }
     }
     normalize_state(State {
-        tree1: next_t1.unwrap_or(Arc::new(Tree::Leaf(0, Zero::zero()))),
-        tree2: next_t2.unwrap_or(Arc::new(Tree::Leaf(0, Zero::zero()))),
+        tree1: next_t1,
+        tree2: next_t2,
         expansions: state.expansions.clone(),
         next_id: state.next_id,
         cut_components: next_comps,
@@ -267,7 +257,7 @@ fn greedy_rollout(state: &State, deadline: Instant) -> Option<Vec<Expansion>> {
     }
     
     if !curr.tree1.is_leaf() || !curr.tree2.is_leaf() {
-        return None; // Invalid/Incomplete solution
+        return None;
     }
     
     let mut ans = curr.cut_components.clone();
