@@ -65,8 +65,11 @@ fn solve_anytime(tree1: Arc<Tree>, tree2: Arc<Tree>, n_leaves: u32, limit_second
     });
 
     // 1. Initial Quick Solution
-    let mut best_ans = Arc::new(Mutex::new(greedy_rollout(&start_state, deadline)));
-    let mut best_count = Arc::new(Mutex::new(best_ans.lock().unwrap().len()));
+    let mut initial_ans = greedy_rollout(&start_state, deadline).unwrap_or_else(|| {
+        (1..=n_leaves).map(Expansion::Leaf).collect()
+    });
+    let best_ans = Arc::new(Mutex::new(initial_ans));
+    let best_count = Arc::new(Mutex::new(best_ans.lock().unwrap().len()));
 
     // 2. Wide Beam Search (Exploration Phase - First 20% of time)
     let beam_deadline = start_time + Duration::from_secs(limit_seconds / 5);
@@ -154,20 +157,21 @@ fn solve_sa_anytime(start_state: &State, deadline: Instant, best_ans: &Arc<Mutex
         let (ids, exp) = candidates.choose(&mut rng).unwrap().clone();
         let next_state = cut_and_normalize(&current_state, &ids, exp);
         
-        let rollout_ans = greedy_rollout(&next_state, deadline);
-        let rollout_count = rollout_ans.len();
-        
-        if rollout_count < current_best_count {
-            let mut bc = best_count.lock().unwrap();
-            if rollout_count < *bc {
-                *bc = rollout_count;
-                *best_ans.lock().unwrap() = rollout_ans;
-            }
-            current_state = next_state;
-        } else {
-            let diff = (rollout_count - current_best_count) as f64;
-            if ((-diff / t).exp()) > rng.random::<f64>() {
+        if let Some(rollout_ans) = greedy_rollout(&next_state, deadline) {
+            let rollout_count = rollout_ans.len();
+            
+            if rollout_count < current_best_count {
+                let mut bc = best_count.lock().unwrap();
+                if rollout_count < *bc {
+                    *bc = rollout_count;
+                    *best_ans.lock().unwrap() = rollout_ans;
+                }
                 current_state = next_state;
+            } else {
+                let diff = (rollout_count - current_best_count) as f64;
+                if ((-diff / t).exp()) > rng.random::<f64>() {
+                    current_state = next_state;
+                }
             }
         }
         
@@ -175,7 +179,6 @@ fn solve_sa_anytime(start_state: &State, deadline: Instant, best_ans: &Arc<Mutex
         // Reheating
         if t < 0.01 { 
             t = 1.0; 
-            // Randomly jump to a different candidate from start
             let start_cands = get_candidates(start_state);
             if !start_cands.is_empty() {
                 let (ids, exp) = start_cands.choose(&mut rng).unwrap().clone();
@@ -254,7 +257,7 @@ fn cut_and_normalize(state: &State, block_ids: &[u32], subtree_exp: Option<Expan
     })
 }
 
-fn greedy_rollout(state: &State, deadline: Instant) -> Vec<Expansion> {
+fn greedy_rollout(state: &State, deadline: Instant) -> Option<Vec<Expansion>> {
     let mut curr = state.clone();
     while !curr.tree1.is_leaf() && Instant::now() < deadline {
         let cands = get_candidates(&curr);
@@ -262,8 +265,13 @@ fn greedy_rollout(state: &State, deadline: Instant) -> Vec<Expansion> {
         let (ids, exp) = cands[0].clone();
         curr = cut_and_normalize(&curr, &ids, exp);
     }
+    
+    if !curr.tree1.is_leaf() || !curr.tree2.is_leaf() {
+        return None; // Invalid/Incomplete solution
+    }
+    
     let mut ans = curr.cut_components.clone();
     let root_id = curr.tree1.leaf_id();
     ans.push(curr.expansions.get(&root_id).cloned().unwrap_or(Expansion::Leaf(root_id)));
-    ans
+    Some(ans)
 }
