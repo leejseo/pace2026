@@ -3,7 +3,7 @@ mod state;
 mod io;
 
 use std::collections::{HashMap, HashSet};
-use crate::tree::{Tree, Expansion, original_to_tree, collect_cherries, cut_leaf, get_all_leaves, OriginalNode};
+use crate::tree::{Tree, Expansion, original_to_tree, collect_cherries, cut_leaf, offpath_candidates, get_all_leaves, OriginalNode};
 use crate::state::{State, normalize_state};
 use crate::io::{parse_instance_file, render_expansion};
 use anyhow::Result;
@@ -73,6 +73,28 @@ fn build_induced_expansion(node: &OriginalNode, leaves: &HashSet<u32>) -> Option
     }
 }
 
+fn get_conflict_candidates(state: &State) -> Vec<u32> {
+    let mut c1 = HashSet::new(); collect_cherries(&state.tree1, &mut c1);
+    let mut c2 = HashSet::new(); collect_cherries(&state.tree2, &mut c2);
+    
+    let mut candidates = HashSet::new();
+    let mut rng = rand::rng();
+    
+    let diff1: Vec<_> = c1.difference(&c2).collect();
+    let diff2: Vec<_> = c2.difference(&c1).collect();
+    
+    // Choose a random conflicting cherry and pick its components
+    if let Some(&(a, b)) = diff1.choose(&mut rng).or(diff2.choose(&mut rng)) {
+        candidates.insert(*a);
+        candidates.insert(*b);
+    }
+    
+    if candidates.is_empty() {
+        return get_all_leaves(&state.tree1);
+    }
+    candidates.into_iter().collect()
+}
+
 fn solve_partition(tree1: Arc<Tree>, tree2: Arc<Tree>, n_leaves: u32, limit_seconds: u64, ot1: &OriginalNode, ot2: &OriginalNode) -> Vec<HashSet<u32>> {
     let start_time = Instant::now();
     let deadline = start_time + Duration::from_secs(limit_seconds);
@@ -92,8 +114,8 @@ fn solve_partition(tree1: Arc<Tree>, tree2: Arc<Tree>, n_leaves: u32, limit_seco
         while Instant::now() < deadline {
             let mut curr = start_state.clone();
             while !curr.tree1.is_leaf() && Instant::now() < deadline {
-                let leaves = get_all_leaves(&curr.tree1);
-                let &leaf_id = leaves.choose(&mut rng).unwrap();
+                let candidates = get_conflict_candidates(&curr);
+                let &leaf_id = candidates.choose(&mut rng).unwrap();
                 
                 let next_t1 = cut_leaf(&curr.tree1, leaf_id);
                 let next_t2 = cut_leaf(&curr.tree2, leaf_id);
@@ -153,6 +175,7 @@ fn merge_partitions(mut p: Vec<HashSet<u32>>, ot1: &OriginalNode, ot2: &Original
                         p[i] = merged;
                         p.remove(j);
                         changed = true;
+                        // Start over the inner loop to find more merges for the updated p[i]
                         continue;
                     }
                 }
