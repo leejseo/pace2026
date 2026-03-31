@@ -84,8 +84,7 @@ def run_benchmark(cmd_prefix, time_limit=5.0):
     return results
 
 if __name__ == "__main__":
-    print("\n=== BENCHMARKING PYTHON SOLVER (BEAM) ===")
-    run_benchmark(["python3", "-m", "pace2026_heuristic_mvp", "--heuristic", "beam"])
-    
-    print("\n=== BENCHMARKING RUST SOLVER (ARENA) ===")
-    run_benchmark(["./pace2026_rs/target/release/pace2026_rs"])
+    import sys
+    limit = 300.0 if "--long" in sys.argv else 10.0
+    print(f"\n=== BENCHMARKING RUST SOLVER (ANYTIME) - LIMIT {limit}s ===")
+    run_benchmark(["./pace2026_rs/target/release/pace2026_rs"], time_limit=limit)

@@ -9,53 +9,183 @@ use crate::io::{parse_instance_file, render_expansion};
 use anyhow::Result;
 use std::time::{Instant, Duration};
 use rayon::prelude::*;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use num_traits::Zero;
 use rand::prelude::*;
 
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 2 {
-        eprintln!("Usage: pace2026_rs <input.nw> [--strategy sa|beam|hybrid] [--time-limit <seconds>]");
+        eprintln!("Usage: pace2026_rs <input.nw> [--time-limit <seconds>]");
         std::process::exit(1);
     }
     
+    // PACE usually gives 10 mins, but user requested 5 mins (300s)
+    let mut time_limit = 300;
+    for i in 0..args.len() {
+        if args[i] == "--time-limit" && i + 1 < args.len() { 
+            time_limit = args[i+1].parse().unwrap_or(300);
+        }
+    }
+
     std::thread::Builder::new()
-        .stack_size(128 * 1024 * 1024) // 128MB for massive trees
-        .spawn(|| { if let Err(e) = run() { eprintln!("Error: {}", e); } })?
+        .stack_size(256 * 1024 * 1024) // 256MB for 100k leaves
+        .spawn(move || { if let Err(e) = run(time_limit) { eprintln!("Error: {}", e); } })?
         .join()
         .expect("Thread failed");
     Ok(())
 }
 
-fn run() -> Result<()> {
+fn run(time_limit: u64) -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
     let input_path = &args[1];
-    
-    let mut strategy = "hybrid";
-    let mut time_limit = 10;
-    
-    for i in 0..args.len() {
-        if args[i] == "--strategy" && i + 1 < args.len() { strategy = &args[i+1]; }
-        if args[i] == "--time-limit" && i + 1 < args.len() { 
-            time_limit = args[i+1].parse().unwrap_or(10);
-        }
-    }
-
     let instance = parse_instance_file(input_path)?;
+    
     let t1 = original_to_tree(&instance.tree1);
     let t2 = original_to_tree(&instance.tree2);
     
-    let components = match strategy {
-        "beam" => solve_beam(t1, t2, instance.n_leaves, time_limit),
-        "sa" => solve_sa(t1, t2, instance.n_leaves, time_limit),
-        _ => solve_hybrid(t1, t2, instance.n_leaves, time_limit),
-    };
+    let components = solve_anytime(t1, t2, instance.n_leaves, time_limit);
     
     for c in components { println!("{};", render_expansion(&c)); }
     Ok(())
 }
 
+fn solve_anytime(tree1: Arc<Tree>, tree2: Arc<Tree>, n_leaves: u32, limit_seconds: u64) -> Vec<Expansion> {
+    let start_time = Instant::now();
+    let deadline = start_time + Duration::from_secs(limit_seconds);
+    
+    let mut expansions = HashMap::new();
+    for i in 1..=n_leaves { expansions.insert(i, Expansion::Leaf(i)); }
+    
+    let start_state = normalize_state(State {
+        tree1, tree2, expansions,
+        next_id: n_leaves + 1,
+        cut_components: Vec::new(),
+        cached_score: (0, 0, 0),
+    });
+
+    // 1. Initial Quick Solution
+    let mut best_ans = Arc::new(Mutex::new(greedy_rollout(&start_state, deadline)));
+    let mut best_count = Arc::new(Mutex::new(best_ans.lock().unwrap().len()));
+
+    // 2. Wide Beam Search (Exploration Phase - First 20% of time)
+    let beam_deadline = start_time + Duration::from_secs(limit_seconds / 5);
+    let beam_results = solve_beam_anytime(&start_state, beam_deadline, &best_ans, &best_count);
+
+    // 3. Parallel Simulated Annealing (Exploitation Phase - Remaining 80% of time)
+    let sa_results: Vec<_> = (0..rayon::current_num_threads()).into_par_iter().map(|i| {
+        // Each thread starts SA from a different promising state found by Beam Search
+        let seed_state = if !beam_results.is_empty() {
+            &beam_results[i % beam_results.len()]
+        } else {
+            &start_state
+        };
+        solve_sa_anytime(seed_state, deadline, &best_ans, &best_count)
+    }).collect();
+
+    // Final result is already stored in best_ans via the Mutex
+    let final_ans = best_ans.lock().unwrap().clone();
+    final_ans
+}
+
+fn solve_beam_anytime(start_state: &State, deadline: Instant, best_ans: &Arc<Mutex<Vec<Expansion>>>, best_count: &Arc<Mutex<usize>>) -> Vec<State> {
+    let mut beam = vec![start_state.clone()];
+    let mut promising_states = Vec::new();
+
+    while !beam.is_empty() && Instant::now() < deadline {
+        let current_best_count = *best_count.lock().unwrap();
+        let next_states: Vec<State> = beam.par_iter().flat_map(|state| {
+            if state.tree1.is_leaf() && state.tree2.is_leaf() { return vec![]; }
+            if state.cut_components.len() >= current_best_count { return vec![]; }
+            
+            get_candidates(state).into_iter().map(|(ids, exp)| {
+                cut_and_normalize(state, &ids, exp)
+            }).collect::<Vec<State>>()
+        }).collect();
+        
+        for state in &next_states {
+            if state.tree1.is_leaf() && state.tree2.is_leaf() {
+                let mut ans = state.cut_components.clone();
+                let root_id = state.tree1.leaf_id();
+                ans.push(state.expansions.get(&root_id).cloned().unwrap_or(Expansion::Leaf(root_id)));
+                
+                let mut bc = best_count.lock().unwrap();
+                if ans.len() < *bc {
+                    *bc = ans.len();
+                    *best_ans.lock().unwrap() = ans;
+                }
+            }
+        }
+        
+        if next_states.is_empty() { break; }
+        let mut sorted = next_states;
+        sorted.sort_unstable_by_key(|s| s.cached_score);
+        
+        let mut unique = Vec::new();
+        let mut seen = HashSet::new();
+        for s in sorted {
+            let key = (s.tree1.mask().clone(), s.tree2.mask().clone());
+            if !seen.contains(&key) {
+                seen.insert(key); unique.push(s);
+            }
+            if unique.len() >= 100 { break; } // Very wide beam
+        }
+        beam = unique.clone();
+        promising_states.extend(unique.into_iter().take(10));
+        if promising_states.len() > 50 { promising_states.drain(0..10); }
+    }
+    promising_states
+}
+
+fn solve_sa_anytime(start_state: &State, deadline: Instant, best_ans: &Arc<Mutex<Vec<Expansion>>>, best_count: &Arc<Mutex<usize>>) {
+    let mut rng = rand::rng();
+    let mut current_state = start_state.clone();
+    let mut t = 1.0f64;
+    let cooling = 0.9999f64;
+    
+    while Instant::now() < deadline {
+        let current_best_count = *best_count.lock().unwrap();
+        let candidates = get_candidates(&current_state);
+        if candidates.is_empty() { 
+            current_state = start_state.clone(); 
+            continue; 
+        }
+        
+        let (ids, exp) = candidates.choose(&mut rng).unwrap().clone();
+        let next_state = cut_and_normalize(&current_state, &ids, exp);
+        
+        let rollout_ans = greedy_rollout(&next_state, deadline);
+        let rollout_count = rollout_ans.len();
+        
+        if rollout_count < current_best_count {
+            let mut bc = best_count.lock().unwrap();
+            if rollout_count < *bc {
+                *bc = rollout_count;
+                *best_ans.lock().unwrap() = rollout_ans;
+            }
+            current_state = next_state;
+        } else {
+            let diff = (rollout_count - current_best_count) as f64;
+            if ((-diff / t).exp()) > rng.random::<f64>() {
+                current_state = next_state;
+            }
+        }
+        
+        t *= cooling;
+        // Reheating
+        if t < 0.01 { 
+            t = 1.0; 
+            // Randomly jump to a different candidate from start
+            let start_cands = get_candidates(start_state);
+            if !start_cands.is_empty() {
+                let (ids, exp) = start_cands.choose(&mut rng).unwrap().clone();
+                current_state = cut_and_normalize(start_state, &ids, exp);
+            }
+        }
+    }
+}
+
+// Reuse existing helper functions (get_candidates, cut_and_normalize, etc.)
 fn build_sub_expansion(tree: &Arc<Tree>, expansions: &HashMap<u32, Expansion>) -> Expansion {
     match tree.as_ref() {
         Tree::Leaf(id, _) => expansions.get(id).cloned().unwrap_or(Expansion::Leaf(*id)),
@@ -110,124 +240,18 @@ fn cut_and_normalize(state: &State, block_ids: &[u32], subtree_exp: Option<Expan
         for &id in block_ids {
             if let Some(t) = next_t1 { next_t1 = cut_leaf(&t, id); }
             if let Some(t) = next_t2 { next_t2 = cut_leaf(&t, id); }
-            let exp = state.expansions.get(&id).cloned().unwrap_or(Expansion::Leaf(id));
-            next_comps.push(exp);
+            if let Some(exp) = state.expansions.get(&id) { next_comps.push(exp.clone()); }
+            else { next_comps.push(Expansion::Leaf(id)); }
         }
     }
-    
     normalize_state(State {
-        tree1: next_t1.unwrap_or(Arc::new(Tree::Leaf(0, num_bigint::BigUint::zero()))),
-        tree2: next_t2.unwrap_or(Arc::new(Tree::Leaf(0, num_bigint::BigUint::zero()))),
+        tree1: next_t1.unwrap_or(Arc::new(Tree::Leaf(0, Zero::zero()))),
+        tree2: next_t2.unwrap_or(Arc::new(Tree::Leaf(0, Zero::zero()))),
         expansions: state.expansions.clone(),
         next_id: state.next_id,
         cut_components: next_comps,
+        cached_score: (0, 0, 0),
     })
-}
-
-fn solve_beam(tree1: Arc<Tree>, tree2: Arc<Tree>, n_leaves: u32, limit_seconds: u64) -> Vec<Expansion> {
-    let start_time = Instant::now();
-    let deadline = start_time + Duration::from_secs(limit_seconds);
-    let mut expansions = HashMap::new();
-    for i in 1..=n_leaves { expansions.insert(i, Expansion::Leaf(i)); }
-    
-    let start_state = normalize_state(State {
-        tree1, tree2, expansions,
-        next_id: n_leaves + 1,
-        cut_components: Vec::new(),
-    });
-    
-    let mut best_ans = Vec::new();
-    for i in 1..=n_leaves { best_ans.push(Expansion::Leaf(i)); }
-    let mut best_count = best_ans.len();
-
-    let mut beam = vec![start_state];
-
-    while !beam.is_empty() && Instant::now() < deadline {
-        let next_states: Vec<State> = beam.par_iter().flat_map(|state| {
-            if state.tree1.is_leaf() && state.tree2.is_leaf() { return vec![]; }
-            if state.cut_components.len() >= best_count { return vec![]; }
-            get_candidates(state).into_iter().map(|(ids, exp)| {
-                cut_and_normalize(state, &ids, exp)
-            }).collect::<Vec<State>>()
-        }).collect();
-        
-        for state in &beam {
-            if state.tree1.is_leaf() && state.tree2.is_leaf() {
-                let mut ans = state.cut_components.clone();
-                let root_id = state.tree1.leaf_id();
-                ans.push(state.expansions.get(&root_id).cloned().unwrap_or(Expansion::Leaf(root_id)));
-                if ans.len() < best_count {
-                    best_count = ans.len(); best_ans = ans;
-                }
-            }
-        }
-        
-        if next_states.is_empty() { break; }
-        let mut sorted = next_states;
-        sorted.sort_unstable_by_key(|s| {
-            let sc = s.shared_clusters();
-            (s.cut_components.len() + s.leaf_count(), -(sc as isize), s.leaf_count())
-        });
-        
-        let mut unique = Vec::new();
-        let mut seen = HashSet::new();
-        for s in sorted {
-            let key = (s.tree1.mask().clone(), s.tree2.mask().clone());
-            if !seen.contains(&key) {
-                seen.insert(key); unique.push(s);
-            }
-            if unique.len() >= 60 { break; }
-        }
-        beam = unique;
-    }
-    best_ans
-}
-
-fn solve_sa(tree1: Arc<Tree>, tree2: Arc<Tree>, n_leaves: u32, limit_seconds: u64) -> Vec<Expansion> {
-    let start_time = Instant::now();
-    let deadline = start_time + Duration::from_secs(limit_seconds);
-    let mut expansions = HashMap::new();
-    for i in 1..=n_leaves { expansions.insert(i, Expansion::Leaf(i)); }
-    
-    let start_state = normalize_state(State {
-        tree1, tree2, expansions,
-        next_id: n_leaves + 1,
-        cut_components: Vec::new(),
-    });
-    
-    let mut best_ans = solve_beam(start_state.tree1.clone(), start_state.tree2.clone(), n_leaves, 1);
-    let mut best_count = best_ans.len();
-    
-    let mut rng = rand::rng();
-    let mut current_state = start_state.clone();
-    let mut t = 1.0f64;
-    let cooling = 0.999f64;
-    
-    while Instant::now() < deadline && t > 0.01 {
-        let candidates = get_candidates(&current_state);
-        if candidates.is_empty() { break; }
-        
-        let (ids, exp) = candidates.choose(&mut rng).unwrap().clone();
-        let next_state = cut_and_normalize(&current_state, &ids, exp);
-        
-        let rollout_ans = greedy_rollout(&next_state, deadline);
-        let rollout_count = rollout_ans.len();
-        
-        if rollout_count < best_count {
-            best_count = rollout_count;
-            best_ans = rollout_ans;
-            current_state = next_state;
-        } else {
-            let diff = (rollout_count - best_count) as f64;
-            if ((-diff / t).exp()) > rng.random::<f64>() {
-                current_state = next_state;
-            }
-        }
-        t *= cooling;
-        if current_state.tree1.is_leaf() { current_state = start_state.clone(); }
-    }
-    
-    best_ans
 }
 
 fn greedy_rollout(state: &State, deadline: Instant) -> Vec<Expansion> {
@@ -235,23 +259,11 @@ fn greedy_rollout(state: &State, deadline: Instant) -> Vec<Expansion> {
     while !curr.tree1.is_leaf() && Instant::now() < deadline {
         let cands = get_candidates(&curr);
         if cands.is_empty() { break; }
-        let (ids, exp) = cands[0].clone(); // Best according to get_candidates sorting
+        let (ids, exp) = cands[0].clone();
         curr = cut_and_normalize(&curr, &ids, exp);
     }
     let mut ans = curr.cut_components.clone();
     let root_id = curr.tree1.leaf_id();
     ans.push(curr.expansions.get(&root_id).cloned().unwrap_or(Expansion::Leaf(root_id)));
     ans
-}
-
-fn solve_hybrid(tree1: Arc<Tree>, tree2: Arc<Tree>, n_leaves: u32, limit_seconds: u64) -> Vec<Expansion> {
-    // 70% Beam, 30% SA
-    let beam_time = (limit_seconds as f64 * 0.7) as u64;
-    let sa_time = limit_seconds - beam_time;
-    
-    let beam_ans = solve_beam(tree1.clone(), tree2.clone(), n_leaves, beam_time);
-    // SA could start from beam results or fresh
-    let sa_ans = solve_sa(tree1, tree2, n_leaves, sa_time);
-    
-    if beam_ans.len() < sa_ans.len() { beam_ans } else { sa_ans }
 }

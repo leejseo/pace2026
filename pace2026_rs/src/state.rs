@@ -9,19 +9,25 @@ pub struct State {
     pub expansions: HashMap<u32, Expansion>,
     pub next_id: u32,
     pub cut_components: Vec<Expansion>,
+    pub cached_score: (usize, isize, usize), // (Total, -Shared, Leaves)
 }
 
 impl State {
-    pub fn leaf_count(&self) -> usize {
-        self.tree1.size()
-    }
-
-    pub fn shared_clusters(&self) -> usize {
-        let mut m1 = HashSet::new();
-        get_cluster_masks(&self.tree1, &mut m1);
-        let mut m2 = HashSet::new();
+    pub fn leaf_count(&self) -> usize { self.tree1.size() }
+    
+    pub fn compute_score(&self) -> (usize, isize, usize) {
+        let mut seen = HashSet::with_capacity(self.tree1.size() * 2);
+        get_cluster_masks(&self.tree1, &mut seen);
+        
+        let mut sc = 0;
+        let mut m2 = HashSet::new(); // Still need to avoid duplicate counts in T2
         get_cluster_masks(&self.tree2, &mut m2);
-        m1.intersection(&m2).count()
+        for mask in m2 {
+            if seen.contains(&mask) {
+                sc += 1;
+            }
+        }
+        (self.cut_components.len() + self.leaf_count(), -(sc as isize), self.leaf_count())
     }
 }
 
@@ -49,5 +55,6 @@ pub fn normalize_state(mut state: State) -> State {
         state.tree1 = contract_cherry(&state.tree1, a, b, new_id);
         state.tree2 = contract_cherry(&state.tree2, a, b, new_id);
     }
+    state.cached_score = state.compute_score();
     state
 }
