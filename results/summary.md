@@ -34,3 +34,17 @@
 | heuristic00.nw | 33 | 32 | 31 |
 | heuristic10.nw | 17 | 17 | 17 |
 | heuristic20.nw | 13 | 13 | 13 |
+
+### Hard Benchmark Run 20260331_203620
+| Instance | 1m | 2m | 3m | 5m |
+| --- | --- | --- | --- | --- |
+| heuristic28.nw | 15692 | 323 | TO | TO |
+| heuristic26.nw | 14734 | TO | TO | TO |
+| heuristic98.nw | 216 | 211 | 216 | 214 |
+
+### Hard Benchmark Run 20260331_211756
+| Instance | 1m | 2m | 3m | 5m |
+| --- | --- | --- | --- | --- |
+| heuristic28.nw | ERR | ERR | ERR | ERR |
+| heuristic26.nw | ERR | ERR | ERR | ERR |
+| heuristic98.nw | ERR | ERR | ERR | ERR |

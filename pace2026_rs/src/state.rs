@@ -1,5 +1,5 @@
 use std::collections::{HashMap, HashSet};
-use crate::tree::{Tree, Expansion, collect_cherries, contract_cherry, get_cluster_masks};
+use crate::tree::{Tree, Expansion, collect_cherries, contract_cherry, get_cluster_masks, FastBitSet};
 use std::sync::Arc;
 
 #[derive(Clone, Debug)]
@@ -20,7 +20,6 @@ impl State {
         get_cluster_masks(&self.tree1, &mut m1);
         let mut m2 = HashSet::new();
         get_cluster_masks(&self.tree2, &mut m2);
-        
         let sc = m1.intersection(&m2).count();
         (self.cut_components.len() + self.leaf_count(), -(sc as isize), self.leaf_count())
     }

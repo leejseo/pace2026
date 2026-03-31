@@ -1,0 +1,7 @@
+Hard Benchmark Run: 20260331_211756
+---------------------------------------------------------------------------
+Instance             | 1m Comp  | 2m Comp  | 3m Comp  | 5m Comp 
+---------------------------------------------------------------------------
+heuristic28.nw       | ERR      | ERR      | ERR      | ERR     
+heuristic26.nw       | ERR      | ERR      | ERR      | ERR     
+heuristic98.nw       | ERR      | ERR      | ERR      | ERR     
