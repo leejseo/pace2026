@@ -38,9 +38,7 @@ fn run(time_limit: u64) -> Result<()> {
     let instance = parse_instance_file(&args[1])?;
     let t1 = original_to_tree(&instance.tree1);
     let t2 = original_to_tree(&instance.tree2);
-    
     let partition = solve_partition(t1, t2, instance.n_leaves, time_limit, &instance.tree1, &instance.tree2);
-    
     for leaf_set in partition {
         if let Some(exp) = build_induced_expansion(&instance.tree1, &leaf_set) {
             println!("{};", render_expansion(&exp));
@@ -76,22 +74,14 @@ fn build_induced_expansion(node: &OriginalNode, leaves: &HashSet<u32>) -> Option
 fn get_conflict_candidates(state: &State) -> Vec<u32> {
     let mut c1 = HashSet::new(); collect_cherries(&state.tree1, &mut c1);
     let mut c2 = HashSet::new(); collect_cherries(&state.tree2, &mut c2);
-    
     let mut candidates = HashSet::new();
     let mut rng = rand::rng();
-    
     let diff1: Vec<_> = c1.difference(&c2).collect();
     let diff2: Vec<_> = c2.difference(&c1).collect();
-    
-    // Choose a random conflicting cherry and pick its components
     if let Some(&(a, b)) = diff1.choose(&mut rng).or(diff2.choose(&mut rng)) {
-        candidates.insert(*a);
-        candidates.insert(*b);
+        candidates.insert(*a); candidates.insert(*b);
     }
-    
-    if candidates.is_empty() {
-        return get_all_leaves(&state.tree1);
-    }
+    if candidates.is_empty() { return get_all_leaves(&state.tree1); }
     candidates.into_iter().collect()
 }
 
@@ -113,15 +103,43 @@ fn solve_partition(tree1: Arc<Tree>, tree2: Arc<Tree>, n_leaves: u32, limit_seco
         let mut rng = rand::rng();
         while Instant::now() < deadline {
             let mut curr = start_state.clone();
+            
+            // Iterative Refinement: occasionally shake the current best
+            let mut p = if rng.random_bool(0.4) {
+                let current_best = best_partition.lock().unwrap().clone();
+                if !current_best.is_empty() && current_best.len() > 3 {
+                    // Start from a state that partially contains the best solution
+                    let shake_count = rng.random_range(1..current_best.len() / 2 + 1);
+                    let mut shaken = current_best;
+                    shaken.shuffle(&mut rng);
+                    // Combine the first shake_count partitions into a "remaining to solve" state
+                    let mut combined_leaves = HashSet::new();
+                    for s in shaken.drain(0..shake_count) { combined_leaves.extend(s); }
+                    
+                    // Filter start_state to only contain combined_leaves
+                    let mut next_t1 = start_state.tree1.clone();
+                    let mut next_t2 = start_state.tree2.clone();
+                    for i in 1..=n_leaves {
+                        if !combined_leaves.contains(&i) {
+                            if let Some(t) = cut_leaf(&next_t1, i) { next_t1 = t; }
+                            if let Some(t) = cut_leaf(&next_t2, i) { next_t2 = t; }
+                        }
+                    }
+                    curr = normalize_state(State {
+                        tree1: next_t1, tree2: next_t2, expansions: start_state.expansions.clone(),
+                        next_id: start_state.next_id, cut_components: Vec::new(), cached_score: (0, 0, 0)
+                    });
+                    shaken // These are already "fixed" agreement subtrees
+                } else { Vec::new() }
+            } else { Vec::new() };
+
             while !curr.tree1.is_leaf() && Instant::now() < deadline {
                 let candidates = get_conflict_candidates(&curr);
                 let &leaf_id = candidates.choose(&mut rng).unwrap();
-                
                 let next_t1 = cut_leaf(&curr.tree1, leaf_id);
                 let next_t2 = cut_leaf(&curr.tree2, leaf_id);
                 let mut next_nc = curr.cut_components.clone();
                 next_nc.push(curr.expansions.get(&leaf_id).cloned().unwrap_or(Expansion::Leaf(leaf_id)));
-                
                 curr = normalize_state(State {
                     tree1: next_t1.unwrap_or(Arc::new(Tree::Leaf(0, Zero::zero()))),
                     tree2: next_t2.unwrap_or(Arc::new(Tree::Leaf(0, Zero::zero()))),
@@ -133,7 +151,6 @@ fn solve_partition(tree1: Arc<Tree>, tree2: Arc<Tree>, n_leaves: u32, limit_seco
             }
             
             if curr.tree1.is_leaf() {
-                let mut p = Vec::new();
                 for comp in &curr.cut_components {
                     let mut s = HashSet::new(); collect_leaves(comp, &mut s);
                     p.push(s);
@@ -145,12 +162,8 @@ fn solve_partition(tree1: Arc<Tree>, tree2: Arc<Tree>, n_leaves: u32, limit_seco
                 p.push(s);
                 
                 p = merge_partitions(p, ot1, ot2);
-                
                 let mut bc = best_count.lock().unwrap();
-                if p.len() < *bc {
-                    *bc = p.len();
-                    *best_partition.lock().unwrap() = p;
-                }
+                if p.len() < *bc { *bc = p.len(); *best_partition.lock().unwrap() = p; }
             }
         }
     });
@@ -169,14 +182,10 @@ fn merge_partitions(mut p: Vec<HashSet<u32>>, ot1: &OriginalNode, ot2: &Original
             while j < p.len() {
                 let mut merged = p[i].clone();
                 merged.extend(&p[j]);
-                
                 if let (Some(e1), Some(e2)) = (build_induced_expansion(ot1, &merged), build_induced_expansion(ot2, &merged)) {
                     if are_isomorphic(&e1, &e2) {
-                        p[i] = merged;
-                        p.remove(j);
-                        changed = true;
-                        // Start over the inner loop to find more merges for the updated p[i]
-                        continue;
+                        p[i] = merged; p.remove(j);
+                        changed = true; continue;
                     }
                 }
                 j += 1;
