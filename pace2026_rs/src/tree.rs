@@ -80,29 +80,6 @@ pub fn cut_leaf(tree: &Arc<Tree>, leaf_id: u32) -> Option<Arc<Tree>> {
     }
 }
 
-pub fn contract_cherry(tree: &Arc<Tree>, a: u32, b: u32, new_id: u32) -> Arc<Tree> {
-    let target_mask = (BigUint::from(1u32) << (a - 1)) | (BigUint::from(1u32) << (b - 1));
-    if (tree.mask() & &target_mask).is_zero() { return tree.clone(); }
-    
-    match tree.as_ref() {
-        Tree::Leaf(_, _) => tree.clone(),
-        Tree::Node(l, r, _, _) => {
-            if l.is_leaf() && r.is_leaf() {
-                let id_l = l.leaf_id(); let id_r = r.leaf_id();
-                if (id_l == a && id_r == b) || (id_l == b && id_r == a) {
-                    return Arc::new(Tree::Leaf(new_id, BigUint::from(1u32) << (new_id - 1)));
-                }
-            }
-            let nl = contract_cherry(l, a, b, new_id);
-            let nr = contract_cherry(r, a, b, new_id);
-            if Arc::ptr_eq(&nl, l) && Arc::ptr_eq(&nr, r) { return tree.clone(); }
-            let m = nl.mask() | nr.mask();
-            let s = nl.size() + nr.size();
-            Arc::new(Tree::Node(nl, nr, m, s))
-        }
-    }
-}
-
 pub fn path_to_leaf(tree: &Arc<Tree>, target_leaf: u32) -> Vec<(Arc<Tree>, usize)> {
     let mut path = Vec::new();
     let mut curr = tree.clone();
