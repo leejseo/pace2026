@@ -12,6 +12,7 @@ use rayon::prelude::*;
 use std::sync::{Arc, Mutex};
 use num_traits::Zero;
 use rand::prelude::*;
+use std::hash::Hasher;
 
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
@@ -24,7 +25,7 @@ fn main() -> Result<()> {
         if args[i] == "--time-limit" && i + 1 < args.len() { time_limit = args[i+1].parse().unwrap_or(300); }
     }
     std::thread::Builder::new()
-        .stack_size(256 * 1024 * 1024)
+        .stack_size(512 * 1024 * 1024) // 512MB for safety on massive instances
         .spawn(move || { if let Err(e) = run(time_limit) { eprintln!("Error: {}", e); } })?
         .join()
         .expect("Thread failed");
@@ -103,9 +104,16 @@ fn solve_partition(t1: Arc<Tree>, t2: Arc<Tree>, n_leaves: u32, limit_seconds: u
                     
                     if let (Some(nt1_exp), Some(nt2_exp)) = (build_induced_expansion(ot1, &remaining_leaves), build_induced_expansion(ot2, &remaining_leaves)) {
                         fn exp_to_tree(e: &Expansion) -> Arc<Tree> {
-                            match e { Expansion::Leaf(id) => Arc::new(Tree::Leaf(*id, num_bigint::BigUint::from(1u32) << (*id - 1))),
-                                      Expansion::Node(l, r) => { let tl = exp_to_tree(l); let tr = exp_to_tree(r);
-                                          Arc::new(Tree::Node(tl.clone(), tr.clone(), tl.mask() | tr.mask(), tl.size() + tr.size())) } }
+                            match e { Expansion::Leaf(id) => {
+                                let m = num_bigint::BigUint::from(1u32) << (*id - 1);
+                                let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                                use std::hash::Hash; m.hash(&mut hasher);
+                                Arc::new(Tree::Leaf(*id, m, hasher.finish()))
+                            }, Expansion::Node(l, r) => { let tl = exp_to_tree(l); let tr = exp_to_tree(r);
+                                let m = tl.mask() | tr.mask();
+                                let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                                use std::hash::Hash; m.hash(&mut hasher);
+                                Arc::new(Tree::Node(tl.clone(), tr.clone(), m, hasher.finish(), tl.size() + tr.size())) } }
                         }
                         curr = normalize_state(State { tree1: exp_to_tree(&nt1_exp), tree2: exp_to_tree(&nt2_exp), expansions: start_state.expansions.clone(), next_id: start_state.next_id, cut_components: Vec::new(), cached_score: (0, 0, 0) });
                         p = to_keep;
@@ -120,7 +128,7 @@ fn solve_partition(t1: Arc<Tree>, t2: Arc<Tree>, n_leaves: u32, limit_seconds: u
                 let next_t2 = cut_leaf(&curr.tree2, leaf_id);
                 let mut next_nc = curr.cut_components.clone();
                 next_nc.push(curr.expansions.get(&leaf_id).cloned().unwrap_or(Expansion::Leaf(leaf_id)));
-                curr = normalize_state(State { tree1: next_t1.unwrap_or(Arc::new(Tree::Leaf(0, Zero::zero()))), tree2: next_t2.unwrap_or(Arc::new(Tree::Leaf(0, Zero::zero()))), expansions: curr.expansions.clone(), next_id: curr.next_id, cut_components: next_nc, cached_score: (0, 0, 0) });
+                curr = normalize_state(State { tree1: next_t1.unwrap_or(Arc::new(Tree::Leaf(0, Zero::zero(), 0))), tree2: next_t2.unwrap_or(Arc::new(Tree::Leaf(0, Zero::zero(), 0))), expansions: curr.expansions.clone(), next_id: curr.next_id, cut_components: next_nc, cached_score: (0, 0, 0) });
             }
             
             if curr.tree1.is_leaf() {
@@ -153,6 +161,9 @@ fn merge_partitions(mut p: Vec<HashSet<u32>>, ot1: &OriginalNode, ot2: &Original
         while i < p.len() {
             let mut j = i + 1;
             while j < p.len() {
+                // Heuristic: only try to merge if components are small or if we have few components
+                if p.len() > 100 && (p[i].len() > 50 || p[j].len() > 50) { j += 1; continue; }
+                
                 let mut merged = p[i].clone();
                 merged.extend(&p[j]);
                 if let (Some(e1), Some(e2)) = (build_induced_expansion(ot1, &merged), build_induced_expansion(ot2, &merged)) {
