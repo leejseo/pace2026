@@ -43,6 +43,8 @@ def validate_solution(inst_path, output_text):
     
     return True, len(components)
 
+from verify_maf import verify_maf
+
 def run_benchmark(cmd_prefix, time_limit=5.0):
     instances = sorted(glob.glob("instances/heuristic*.nw"))
     subset = instances[::10] # 00, 10, 20...
@@ -52,25 +54,25 @@ def run_benchmark(cmd_prefix, time_limit=5.0):
     print("-" * 60)
     
     for inst_path in subset:
-        n_leaves = len(parse_newick_labels(open(inst_path).read()))
+        # Get leaf count safely
+        with open(inst_path, "r") as f:
+            content = f.read()
+            n_leaves = len(re.findall(r'\d+', content)) // 2 # Rough estimate
         
         start_time = time.monotonic()
         try:
-            cmd = cmd_prefix + [inst_path, "--time-limit-seconds", str(time_limit)]
-            # For Rust, we might need to handle args differently
-            if "rs" in cmd_prefix[0]:
-                cmd = [cmd_prefix[0], inst_path] # Rust currently only takes path
-                
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=time_limit + 5)
+            cmd = cmd_prefix + [inst_path, "--time-limit", str(int(time_limit))]
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=time_limit + 10)
             elapsed = time.monotonic() - start_time
             
             if result.returncode == 0:
-                is_valid, val_result = validate_solution(inst_path, result.stdout)
+                is_valid, val_result = verify_maf(inst_path, result.stdout)
                 if is_valid:
                     print(f"{os.path.basename(inst_path):<15} | {n_leaves:<8} | {'OK':<10} | {val_result:<6} | {elapsed:<8.2f}")
                     results.append((val_result, elapsed))
                 else:
                     print(f"{os.path.basename(inst_path):<15} | {n_leaves:<8} | {'INVALID':<10} | {'-':<6} | {elapsed:<8.2f}")
+                    print(f"  Reason: {val_result}")
             else:
                 print(f"{os.path.basename(inst_path):<15} | {n_leaves:<8} | {'ERROR':<10} | {'-':<6} | {elapsed:<8.2f}")
         except subprocess.TimeoutExpired:

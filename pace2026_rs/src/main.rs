@@ -3,7 +3,7 @@ mod state;
 mod io;
 
 use std::collections::{HashMap, HashSet};
-use crate::tree::{Tree, Expansion, original_to_tree, collect_cherries, cut_leaf, offpath_candidates, get_all_leaves};
+use crate::tree::{Tree, Expansion, original_to_tree, collect_cherries, cut_leaf, offpath_candidates, get_all_leaves, OriginalNode};
 use crate::state::{State, normalize_state};
 use crate::io::{parse_instance_file, render_expansion};
 use anyhow::Result;
@@ -39,16 +39,37 @@ fn run(time_limit: u64) -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
     let input_path = &args[1];
     let instance = parse_instance_file(input_path)?;
+    
     let t1 = original_to_tree(&instance.tree1);
     let t2 = original_to_tree(&instance.tree2);
-    let components = solve_anytime(t1, t2, instance.n_leaves, time_limit);
+    
+    let components = solve_anytime(t1, t2, instance.n_leaves, time_limit, &instance.tree1);
+    
     for c in components { println!("{};", render_expansion(&c)); }
     Ok(())
 }
 
-fn solve_anytime(tree1: Arc<Tree>, tree2: Arc<Tree>, n_leaves: u32, limit_seconds: u64) -> Vec<Expansion> {
+// Fixed: Reconstruction now uses the original T1 structure to guarantee agreement
+fn build_canonical_expansion(original: &OriginalNode, leaves: &HashSet<u32>) -> Option<Expansion> {
+    if let Some(id) = original.label {
+        if leaves.contains(&id) { return Some(Expansion::Leaf(id)); }
+        else { return None; }
+    }
+    
+    let l = build_canonical_expansion(original.left.as_ref().unwrap(), leaves);
+    let r = build_canonical_expansion(original.right.as_ref().unwrap(), leaves);
+    
+    match (l, r) {
+        (Some(tl), Some(tr)) => Some(Expansion::Node(Box::new(tl), Box::new(tr))),
+        (Some(t), None) | (None, Some(t)) => Some(t),
+        (None, None) => None,
+    }
+}
+
+fn solve_anytime(tree1: Arc<Tree>, tree2: Arc<Tree>, n_leaves: u32, limit_seconds: u64, original_t1: &OriginalNode) -> Vec<Expansion> {
     let start_time = Instant::now();
     let deadline = start_time + Duration::from_secs(limit_seconds);
+    
     let mut expansions = HashMap::new();
     for i in 1..=n_leaves { expansions.insert(i, Expansion::Leaf(i)); }
     
@@ -80,8 +101,21 @@ fn solve_anytime(tree1: Arc<Tree>, tree2: Arc<Tree>, n_leaves: u32, limit_second
         }
     });
 
-    let final_ans = best_ans.lock().unwrap().clone();
-    final_ans
+    // CRITICAL: Final step - rebuild all components from original_t1 to ensure perfect validity
+    let raw_ans = best_ans.lock().unwrap().clone();
+    let mut validated_ans = Vec::new();
+    for comp in raw_ans {
+        let mut leaves = HashSet::new();
+        fn collect(e: &Expansion, s: &mut HashSet<u32>) {
+            match e { Expansion::Leaf(id) => { s.insert(*id); }
+                      Expansion::Node(l, r) => { collect(l, s); collect(r, s); } }
+        }
+        collect(&comp, &mut leaves);
+        if let Some(valid_comp) = build_canonical_expansion(original_t1, &leaves) {
+            validated_ans.push(valid_comp);
+        }
+    }
+    validated_ans
 }
 
 fn solve_sa_anytime(start_state: &State, deadline: Instant, best_ans: &Arc<Mutex<Vec<Expansion>>>, best_count: &Arc<Mutex<usize>>) {
@@ -93,13 +127,10 @@ fn solve_sa_anytime(start_state: &State, deadline: Instant, best_ans: &Arc<Mutex
     while Instant::now() < deadline {
         let current_best_count = *best_count.lock().unwrap();
         let candidates = get_candidates(&current_state);
-        if candidates.is_empty() { 
-            current_state = start_state.clone(); continue; 
-        }
+        if candidates.is_empty() { current_state = start_state.clone(); continue; }
         
         let (ids, exp) = candidates.choose(&mut rng).unwrap().clone();
         let next_state = cut_and_normalize(&current_state, &ids, exp);
-        
         let next_score = next_state.cached_score.0;
         
         if next_score <= current_best_count + 1 {
@@ -119,7 +150,6 @@ fn solve_sa_anytime(start_state: &State, deadline: Instant, best_ans: &Arc<Mutex
         } else if ((-( (next_score - current_best_count) as f64) / t).exp()) > rng.random::<f64>() {
             current_state = next_state;
         }
-        
         t *= cooling;
         if t < 0.05 { t = 1.0; }
     }
@@ -133,7 +163,6 @@ fn get_candidates(state: &State) -> Vec<(Vec<u32>, Option<Expansion>)> {
     
     let mut candidates = Vec::new();
     let mut rng = rand::rng();
-    
     let diff1: Vec<_> = c1.difference(&c2).collect();
     let diff2: Vec<_> = c2.difference(&c1).collect();
     
@@ -153,7 +182,6 @@ fn get_candidates(state: &State) -> Vec<(Vec<u32>, Option<Expansion>)> {
             }
         }
     }
-    
     if candidates.is_empty() {
         let all = get_all_leaves(&state.tree1);
         for &leaf in all.iter().take(15) { candidates.push((vec![leaf], None)); }
@@ -172,7 +200,6 @@ fn solve_beam_anytime(start_state: &State, deadline: Instant, best_ans: &Arc<Mut
             if state.cut_components.len() >= current_best_count { return vec![]; }
             get_candidates(state).into_iter().map(|(ids, exp)| cut_and_normalize(state, &ids, exp)).collect::<Vec<State>>()
         }).collect();
-        
         for state in &next_states {
             if state.tree1.is_leaf() && state.tree2.is_leaf() {
                 let mut ans = state.cut_components.clone();
