@@ -1,100 +1,93 @@
 import re
 import sys
 
-class Node:
-    def __init__(self, left=None, right=None, label=None):
-        self.left = left
-        self.right = right
-        self.label = label
-    def is_leaf(self):
-        return self.label is not None
-
-def parse_newick(text):
+def parse_newick_to_clusters(text):
+    """Parses a Newick string and returns a set of all clusters (leaf sets)."""
     text = text.strip().replace(" ", "")
+    if not text: return set()
+    
     pos = 0
+    clusters = []
+    
     def parse_rec():
         nonlocal pos
+        if pos >= len(text): return set()
+        
         if text[pos].isdigit():
             start = pos
             while pos < len(text) and text[pos].isdigit():
                 pos += 1
-            return Node(label=int(text[start:pos]))
+            leaf = {int(text[start:pos])}
+            # Single leaves are technically clusters but often ignored in comparison
+            return leaf
+        
         if text[pos] == '(':
             pos += 1 # skip (
-            left = parse_rec()
-            pos += 1 # skip ,
-            right = parse_rec()
-            pos += 1 # skip )
-            return Node(left=left, right=right)
-    return parse_rec()
+            left_set = parse_rec()
+            if pos < len(text) and text[pos] == ',':
+                pos += 1 # skip ,
+            right_set = parse_rec()
+            if pos < len(text) and text[pos] == ')':
+                pos += 1 # skip )
+            
+            full_set = left_set | right_set
+            clusters.append(frozenset(full_set))
+            return full_set
+        return set()
 
-def get_induced_subtree(root, labels):
-    """Returns a simplified tree containing only the given labels."""
-    if root.is_leaf():
-        return root if root.label in labels else None
-    
-    l = get_induced_subtree(root.left, labels)
-    r = get_induced_subtree(root.right, labels)
-    
-    if l and r: return Node(left=l, right=r)
-    return l or r
+    root_set = parse_rec()
+    return set(clusters), root_set
 
-def are_isomorphic(n1, n2):
-    """Checks if two trees have the same topology."""
-    if n1.is_leaf() and n2.is_leaf():
-        return n1.label == n2.label
-    if n1.is_leaf() or n2.is_leaf():
-        return False
-    
-    # Try both orientations (since children order might differ in agreement)
-    case1 = are_isomorphic(n1.left, n2.left) and are_isomorphic(n1.right, n2.right)
-    case2 = are_isomorphic(n1.left, n2.right) and are_isomorphic(n1.right, n2.left)
-    return case1 or case2
+def get_induced_clusters(original_clusters, target_leaves):
+    """Filters original clusters to only those that contain a subset of target_leaves."""
+    induced = []
+    for c in original_clusters:
+        intersection = c & target_leaves
+        if len(intersection) > 1:
+            induced.append(frozenset(intersection))
+    return set(induced)
 
 def verify_maf(inst_path, output_text):
-    """Comprehensive MAF verification."""
-    with open(inst_path, "r") as f:
-        lines = [l.strip() for l in f if l.strip() and not l.startswith("#")]
-    
-    T1 = parse_newick(lines[0])
-    T2 = parse_newick(lines[1])
-    
-    # 1. Parse output components
-    comp_texts = [c.strip() for c in output_text.strip().split(';') if c.strip()]
-    forest = [parse_newick(c) for c in comp_texts]
-    
-    # 2. Check leaf partition
-    all_original_labels = set(re.findall(r'\d+', "".join(lines)))
-    all_forest_labels = []
-    for comp in forest:
-        def collect(n, l):
-            if n.is_leaf(): l.append(str(n.label))
-            else: collect(n.left, l); collect(n.right, l)
-        collect(comp, all_forest_labels)
-    
-    if set(all_forest_labels) != all_original_labels:
-        return False, "Leaf set mismatch"
-    if len(all_forest_labels) != len(set(all_forest_labels)):
-        return False, "Duplicate leaves in forest"
-
-    # 3. Check if each component is an Agreement Subtree
-    for i, comp in enumerate(forest):
-        labels = set()
-        def collect(n, l):
-            if n.is_leaf(): l.add(n.label)
-            else: collect(n.left, l); collect(n.right, l)
-        collect(comp, labels)
+    try:
+        with open(inst_path, "r") as f:
+            lines = [l.strip() for l in f if l.strip() and not l.startswith("#")]
         
-        # Induced subtrees in original T1 and T2 must be isomorphic to the component
-        sub1 = get_induced_subtree(T1, labels)
-        sub2 = get_induced_subtree(T2, labels)
+        # 1. Parse Input Trees into Cluster Sets
+        c1_all, l1_all = parse_newick_to_clusters(lines[0])
+        c2_all, l2_all = parse_newick_to_clusters(lines[1])
         
-        if not (are_isomorphic(comp, sub1) and are_isomorphic(comp, sub2)):
-            return False, f"Component {i} is not a common agreement subtree"
-
-    return True, len(forest)
+        # 2. Parse Output Components
+        comp_texts = [c.strip() for c in output_text.strip().split(';') if c.strip()]
+        all_forest_leaves = set()
+        
+        for i, comp_text in enumerate(comp_texts):
+            comp_clusters, comp_leaves = parse_newick_to_clusters(comp_text)
+            
+            # Check overlap
+            if not comp_leaves.isdisjoint(all_forest_leaves):
+                return False, f"Component {i} has overlapping leaves"
+            all_forest_leaves |= comp_leaves
+            
+            # 3. Check Agreement: Cluster sets must match the induced original clusters
+            # For rooted trees, isomorphism is equivalent to having identical cluster sets
+            # when restricted to the same leaf set.
+            induced1 = get_induced_clusters(c1_all, comp_leaves)
+            induced2 = get_induced_clusters(c2_all, comp_leaves)
+            
+            if comp_clusters != induced1:
+                return False, f"Component {i} structure mismatch with T1"
+            if comp_clusters != induced2:
+                return False, f"Component {i} structure mismatch with T2"
+                
+        # 4. Check Partition Completeness
+        if all_forest_leaves != l1_all:
+            return False, f"Leaf partition incomplete: missing {len(l1_all - all_forest_leaves)} labels"
+            
+        return True, len(comp_texts)
+        
+    except Exception as e:
+        return False, f"Verifier Error: {str(e)}"
 
 if __name__ == "__main__":
-    # Unit tests for the verifier itself
-    print("Self-testing verifier...")
-    # Add logic here if run directly
+    if len(sys.argv) == 3:
+        print(verify_maf(sys.argv[1], sys.argv[2]))
