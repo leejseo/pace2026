@@ -71,7 +71,7 @@ fn solve_anytime(tree1: Arc<Tree>, tree2: Arc<Tree>, n_leaves: u32, limit_second
     (0..rayon::current_num_threads()).into_par_iter().for_each(|i| {
         let mut rng = rand::rng();
         while Instant::now() < deadline {
-            let seed_state = if !beam_results.is_empty() && rng.random_bool(0.4) {
+            let seed_state = if !beam_results.is_empty() && rng.random_bool(0.5) {
                 beam_results[i % beam_results.len()].clone()
             } else {
                 start_state.clone()
@@ -88,12 +88,10 @@ fn solve_sa_anytime(start_state: &State, deadline: Instant, best_ans: &Arc<Mutex
     let mut rng = rand::rng();
     let mut current_state = start_state.clone();
     let mut t = 1.0f64;
-    let cooling = 0.99999f64;
+    let cooling = 0.99998f64;
     
     while Instant::now() < deadline {
         let current_best_count = *best_count.lock().unwrap();
-        
-        // Advanced Branching Rule: Whidden's Cherry Selection
         let candidates = get_candidates(&current_state);
         if candidates.is_empty() { 
             current_state = start_state.clone(); continue; 
@@ -104,7 +102,6 @@ fn solve_sa_anytime(start_state: &State, deadline: Instant, best_ans: &Arc<Mutex
         
         let next_score = next_state.cached_score.0;
         
-        // High-Quality Rollout Decision
         if next_score <= current_best_count + 1 {
             if let Some(rollout_ans) = greedy_rollout(&next_state, deadline) {
                 let rollout_count = rollout_ans.len();
@@ -124,7 +121,7 @@ fn solve_sa_anytime(start_state: &State, deadline: Instant, best_ans: &Arc<Mutex
         }
         
         t *= cooling;
-        if t < 0.01 { t = 1.0; }
+        if t < 0.05 { t = 1.0; }
     }
 }
 
@@ -140,27 +137,26 @@ fn get_candidates(state: &State) -> Vec<(Vec<u32>, Option<Expansion>)> {
     let diff1: Vec<_> = c1.difference(&c2).collect();
     let diff2: Vec<_> = c2.difference(&c1).collect();
     
-    // Prioritize cherries that exist in one but not the other (Whidden Branching)
     for _ in 0..5 {
         if let Some(&(a, b)) = diff1.choose(&mut rng) {
             candidates.push((vec![*a], None));
             candidates.push((vec![*b], None));
             for sub in offpath_candidates(&state.tree2, *a, *b).into_iter().take(2) {
-                candidates.push((get_all_leaves(&sub), Some(build_sub_expansion(&sub, &state.expansions))));
+                candidates.push((get_all_leaves(&sub), Some(build_sub_expansion_simple(&sub, &state.expansions))));
             }
         }
         if let Some(&(a, b)) = diff2.choose(&mut rng) {
             candidates.push((vec![*a], None));
             candidates.push((vec![*b], None));
             for sub in offpath_candidates(&state.tree1, *a, *b).into_iter().take(2) {
-                candidates.push((get_all_leaves(&sub), Some(build_sub_expansion(&sub, &state.expansions))));
+                candidates.push((get_all_leaves(&sub), Some(build_sub_expansion_simple(&sub, &state.expansions))));
             }
         }
     }
     
     if candidates.is_empty() {
         let all = get_all_leaves(&state.tree1);
-        for &leaf in all.iter().take(10) { candidates.push((vec![leaf], None)); }
+        for &leaf in all.iter().take(15) { candidates.push((vec![leaf], None)); }
     }
     candidates.truncate(40);
     candidates
@@ -180,8 +176,8 @@ fn solve_beam_anytime(start_state: &State, deadline: Instant, best_ans: &Arc<Mut
         for state in &next_states {
             if state.tree1.is_leaf() && state.tree2.is_leaf() {
                 let mut ans = state.cut_components.clone();
-                let root_id = state.tree1.leaf_id();
-                ans.push(state.expansions.get(&root_id).cloned().unwrap_or(Expansion::Leaf(root_id)));
+                let rid = state.tree1.leaf_id();
+                ans.push(state.expansions.get(&rid).cloned().unwrap_or(Expansion::Leaf(rid)));
                 let mut bc = best_count.lock().unwrap();
                 if ans.len() < *bc { *bc = ans.len(); *best_ans.lock().unwrap() = ans; }
             }
@@ -194,7 +190,7 @@ fn solve_beam_anytime(start_state: &State, deadline: Instant, best_ans: &Arc<Mut
         for s in sorted {
             let key = (s.tree1.mask().clone(), s.tree2.mask().clone());
             if !seen.contains(&key) { seen.insert(key); unique.push(s); }
-            if unique.len() >= 80 { break; }
+            if unique.len() >= 100 { break; }
         }
         beam = unique.clone();
         promising.extend(unique.into_iter().take(5));
@@ -203,10 +199,10 @@ fn solve_beam_anytime(start_state: &State, deadline: Instant, best_ans: &Arc<Mut
     promising
 }
 
-fn build_sub_expansion(tree: &Arc<Tree>, expansions: &HashMap<u32, Expansion>) -> Expansion {
+fn build_sub_expansion_simple(tree: &Arc<Tree>, expansions: &HashMap<u32, Expansion>) -> Expansion {
     match tree.as_ref() {
         Tree::Leaf(id, _) => expansions.get(id).cloned().unwrap_or(Expansion::Leaf(*id)),
-        Tree::Node(l, r, _, _) => Expansion::Node(Box::new(build_sub_expansion(l, expansions)), Box::new(build_sub_expansion(r, expansions)))
+        Tree::Node(l, r, _, _) => Expansion::Node(Box::new(build_sub_expansion_simple(l, expansions)), Box::new(build_sub_expansion_simple(r, expansions)))
     }
 }
 
