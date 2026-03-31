@@ -65,21 +65,19 @@ fn build_induced_expansion(node: &OriginalNode, leaves: &HashSet<u32>) -> Option
 fn get_conflict_candidates(state: &State) -> Vec<u32> {
     let mut c1 = HashSet::new(); collect_cherries(&state.tree1, &mut c1);
     let mut c2 = HashSet::new(); collect_cherries(&state.tree2, &mut c2);
-    let mut candidates = HashSet::new();
+    let mut diff1: Vec<_> = c1.difference(&c2).collect();
+    let mut diff2: Vec<_> = c2.difference(&c1).collect();
     let mut rng = rand::rng();
-    let diff1: Vec<_> = c1.difference(&c2).collect();
-    let diff2: Vec<_> = c2.difference(&c1).collect();
-    if let Some(&(a, b)) = diff1.choose(&mut rng).or(diff2.choose(&mut rng)) { candidates.insert(*a); candidates.insert(*b); }
-    if candidates.is_empty() { return get_all_leaves(&state.tree1); }
-    candidates.into_iter().collect()
+    if let Some(&(a, b)) = diff1.choose(&mut rng).or(diff2.choose(&mut rng)) { return vec![*a, *b]; }
+    get_all_leaves(&state.tree1)
 }
 
-fn solve_partition(tree1: Arc<Tree>, tree2: Arc<Tree>, n_leaves: u32, limit_seconds: u64, ot1: &OriginalNode, ot2: &OriginalNode) -> Vec<HashSet<u32>> {
+fn solve_partition(t1: Arc<Tree>, t2: Arc<Tree>, n_leaves: u32, limit_seconds: u64, ot1: &OriginalNode, ot2: &OriginalNode) -> Vec<HashSet<u32>> {
     let start_time = Instant::now();
     let deadline = start_time + Duration::from_secs(limit_seconds);
     let mut expansions = HashMap::new();
     for i in 1..=n_leaves { expansions.insert(i, Expansion::Leaf(i)); }
-    let start_state = normalize_state(State { tree1, tree2, expansions, next_id: n_leaves + 1, cut_components: Vec::new(), cached_score: (0, 0, 0) });
+    let start_state = normalize_state(State { tree1: t1, tree2: t2, expansions, next_id: n_leaves + 1, cut_components: Vec::new(), cached_score: (0, 0, 0) });
     let best_partition = Arc::new(Mutex::new(vec![]));
     let best_count = Arc::new(Mutex::new(n_leaves as usize + 1));
 
@@ -89,27 +87,29 @@ fn solve_partition(tree1: Arc<Tree>, tree2: Arc<Tree>, n_leaves: u32, limit_seco
             let mut curr = start_state.clone();
             let mut p = Vec::new();
             
-            // Iterative Refinement: Start from a valid partial best
             if rng.random_bool(0.4) {
                 let current_best = best_partition.lock().unwrap().clone();
-                if !current_best.is_empty() && current_best.len() > 3 {
+                if !current_best.is_empty() {
                     let mut shaken = current_best; shaken.shuffle(&mut rng);
                     let keep_count = rng.random_range(1..shaken.len() / 2 + 1);
                     let mut to_keep = Vec::new();
-                    let mut leaves_to_remove = HashSet::new();
+                    let mut kept_leaves = HashSet::new();
                     for s in shaken.drain(0..keep_count) {
-                        for &l in &s { leaves_to_remove.insert(l); }
+                        for &l in &s { kept_leaves.insert(l); }
                         to_keep.push(s);
                     }
-                    // Filter current trees to only contain remaining leaves
-                    let mut nt1 = start_state.tree1.clone();
-                    let mut nt2 = start_state.tree2.clone();
-                    for l in leaves_to_remove {
-                        if let Some(t) = cut_leaf(&nt1, l) { nt1 = t; }
-                        if let Some(t) = cut_leaf(&nt2, l) { nt2 = t; }
+                    let mut remaining_leaves = HashSet::new();
+                    for i in 1..=n_leaves { if !kept_leaves.contains(&i) { remaining_leaves.insert(i); } }
+                    
+                    if let (Some(nt1_exp), Some(nt2_exp)) = (build_induced_expansion(ot1, &remaining_leaves), build_induced_expansion(ot2, &remaining_leaves)) {
+                        fn exp_to_tree(e: &Expansion) -> Arc<Tree> {
+                            match e { Expansion::Leaf(id) => Arc::new(Tree::Leaf(*id, num_bigint::BigUint::from(1u32) << (*id - 1))),
+                                      Expansion::Node(l, r) => { let tl = exp_to_tree(l); let tr = exp_to_tree(r);
+                                          Arc::new(Tree::Node(tl.clone(), tr.clone(), tl.mask() | tr.mask(), tl.size() + tr.size())) } }
+                        }
+                        curr = normalize_state(State { tree1: exp_to_tree(&nt1_exp), tree2: exp_to_tree(&nt2_exp), expansions: start_state.expansions.clone(), next_id: start_state.next_id, cut_components: Vec::new(), cached_score: (0, 0, 0) });
+                        p = to_keep;
                     }
-                    curr = normalize_state(State { tree1: nt1, tree2: nt2, expansions: start_state.expansions.clone(), next_id: start_state.next_id, cut_components: Vec::new(), cached_score: (0, 0, 0) });
-                    p = to_keep;
                 }
             }
 
