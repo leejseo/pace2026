@@ -12,6 +12,7 @@ use rayon::prelude::*;
 use std::sync::{Arc, Mutex};
 use num_traits::Zero;
 use rand::prelude::*;
+use num_bigint::BigUint;
 
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
@@ -39,26 +40,20 @@ fn run(time_limit: u64) -> Result<()> {
     let instance = parse_instance_file(input_path)?;
     let t1 = original_to_tree(&instance.tree1);
     let t2 = original_to_tree(&instance.tree2);
-    let components = solve_anytime(t1, t2, instance.n_leaves, time_limit, &instance.tree1);
+    let components = solve_anytime(t1, t2, instance.n_leaves, time_limit, &instance.tree1, &instance.tree2);
     for c in components { println!("{};", render_expansion(&c)); }
     Ok(())
 }
 
-fn build_canonical_expansion(original: &OriginalNode, leaves: &HashSet<u32>) -> Option<Expansion> {
-    if let Some(id) = original.label {
-        if leaves.contains(&id) { return Some(Expansion::Leaf(id)); }
-        else { return None; }
-    }
-    let l = build_canonical_expansion(original.left.as_ref().unwrap(), leaves);
-    let r = build_canonical_expansion(original.right.as_ref().unwrap(), leaves);
-    match (l, r) {
-        (Some(tl), Some(tr)) => Some(Expansion::Node(Box::new(tl), Box::new(tr))),
-        (Some(t), None) | (None, Some(t)) => Some(t),
-        (None, None) => None,
+fn is_cluster_in_tree(tree: &Arc<Tree>, mask: &BigUint) -> bool {
+    if tree.mask() == mask { return true; }
+    match tree.as_ref() {
+        Tree::Leaf(_, _) => false,
+        Tree::Node(l, r, _, _) => is_cluster_in_tree(l, mask) || is_cluster_in_tree(r, mask),
     }
 }
 
-fn solve_anytime(tree1: Arc<Tree>, tree2: Arc<Tree>, n_leaves: u32, limit_seconds: u64, original_t1: &OriginalNode) -> Vec<Expansion> {
+fn solve_anytime(tree1: Arc<Tree>, tree2: Arc<Tree>, n_leaves: u32, limit_seconds: u64, original_t1: &OriginalNode, original_t2: &OriginalNode) -> Vec<Expansion> {
     let start_time = Instant::now();
     let deadline = start_time + Duration::from_secs(limit_seconds);
     let mut expansions = HashMap::new();
@@ -90,20 +85,7 @@ fn solve_anytime(tree1: Arc<Tree>, tree2: Arc<Tree>, n_leaves: u32, limit_second
         }
     });
 
-    let raw_ans = best_ans.lock().unwrap().clone();
-    let mut validated_ans = Vec::new();
-    for comp in raw_ans {
-        let mut leaves = HashSet::new();
-        fn collect(e: &Expansion, s: &mut HashSet<u32>) {
-            match e { Expansion::Leaf(id) => { s.insert(*id); }
-                      Expansion::Node(l, r) => { collect(l, s); collect(r, s); } }
-        }
-        collect(&comp, &mut leaves);
-        if let Some(valid_comp) = build_canonical_expansion(original_t1, &leaves) {
-            validated_ans.push(valid_comp);
-        }
-    }
-    validated_ans
+    best_ans.lock().unwrap().clone()
 }
 
 fn solve_sa_anytime(start_state: &State, deadline: Instant, best_ans: &Arc<Mutex<Vec<Expansion>>>, best_count: &Arc<Mutex<usize>>) {
@@ -154,24 +136,29 @@ fn get_candidates(state: &State) -> Vec<(Vec<u32>, Option<Expansion>)> {
     let diff1: Vec<_> = c1.difference(&c2).collect();
     let diff2: Vec<_> = c2.difference(&c1).collect();
     
-    // Verify that a cut set actually forms a cluster in BOTH trees if it's a macro-cut
     for _ in 0..5 {
         if let Some(&(a, b)) = diff1.choose(&mut rng) {
             candidates.push((vec![*a], None));
             candidates.push((vec![*b], None));
             for sub in offpath_candidates(&state.tree2, *a, *b) {
-                let leaves = get_all_leaves(&sub);
-                // In MAF, any pendant subtree cut from T2 must also be an agreement subtree.
-                // Cluster reduction already handled many cases, but for new cuts, we check.
-                candidates.push((leaves, Some(build_sub_expansion_simple(&sub, &state.expansions))));
+                // IMPORTANT: Only cut as a subtree if it's a cluster in BOTH trees
+                if is_cluster_in_tree(&state.tree1, sub.mask()) {
+                    candidates.push((get_all_leaves(&sub), Some(build_sub_expansion_simple(&sub, &state.expansions))));
+                } else {
+                    // Otherwise, just cut the individual leaves
+                    for leaf in get_all_leaves(&sub) { candidates.push((vec![leaf], None)); }
+                }
             }
         }
         if let Some(&(a, b)) = diff2.choose(&mut rng) {
             candidates.push((vec![*a], None));
             candidates.push((vec![*b], None));
             for sub in offpath_candidates(&state.tree1, *a, *b) {
-                let leaves = get_all_leaves(&sub);
-                candidates.push((leaves, Some(build_sub_expansion_simple(&sub, &state.expansions))));
+                if is_cluster_in_tree(&state.tree2, sub.mask()) {
+                    candidates.push((get_all_leaves(&sub), Some(build_sub_expansion_simple(&sub, &state.expansions))));
+                } else {
+                    for leaf in get_all_leaves(&sub) { candidates.push((vec![leaf], None)); }
+                }
             }
         }
     }
