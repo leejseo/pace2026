@@ -4,11 +4,7 @@ import time
 import glob
 import re
 from datetime import datetime
-
-def get_comp_count(output):
-    solution_lines = [l.strip() for l in output.strip().splitlines() if l.strip() and not l.startswith("#")]
-    output_clean = "".join(solution_lines)
-    return len([c for c in output_clean.split(';') if c.strip()])
+from verify_maf import verify_maf
 
 def run_test():
     # Use 3 representative instances
@@ -58,9 +54,13 @@ def run_test():
                     dot_thread.join()
                     
                     if result.returncode == 0:
-                        comp = get_comp_count(result.stdout)
-                        row_data.append(str(comp))
-                        print(f" Done ({comp} components)")
+                        is_valid, comp_or_err = verify_maf(inst, result.stdout)
+                        if is_valid:
+                            row_data.append(str(comp_or_err))
+                            print(f" Done ({comp_or_err} components)")
+                        else:
+                            row_data.append("INV")
+                            print(f" Invalid: {comp_or_err}")
                     else:
                         row_data.append("ERR")
                         print(" Error")
@@ -89,7 +89,8 @@ def run_test():
             lines = lf.readlines()[4:] # Skip headers
             for line in lines:
                 parts = [p.strip() for p in line.split("|")]
-                f.write(f"| {' | '.join(parts)} |\n")
+                if len(parts) >= 4:
+                    f.write(f"| {' | '.join(parts)} |\n")
 
 if __name__ == "__main__":
     print("Compiling Rust solver...")
@@ -98,4 +99,4 @@ if __name__ == "__main__":
     
     # Git push
     print("Pushing results to Git...")
-    subprocess.run("git add . && git commit -m 'Add benchmark results' && git push", shell=True)
+    subprocess.run("git add results/ .gitignore compare_times.py && git commit -m 'Cleanup old results and add verified benchmark results' && git push", shell=True)
