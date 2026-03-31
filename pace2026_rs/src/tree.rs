@@ -127,6 +127,62 @@ pub fn get_all_leaves(tree: &Arc<Tree>) -> Vec<u32> {
     leaves
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_test_node(label: Option<u32>, left: Option<Arc<Tree>>, right: Option<Arc<Tree>>) -> Arc<Tree> {
+        if let Some(id) = label {
+            Arc::new(Tree::Leaf(id, BigUint::from(1u32) << (id - 1)))
+        } else {
+            let l = left.unwrap();
+            let r = right.unwrap();
+            let m = l.mask() | r.mask();
+            let s = l.size() + r.size();
+            Arc::new(Tree::Node(l, r, m, s))
+        }
+    }
+
+    #[test]
+    fn test_tree_size_and_mask() {
+        let l1 = make_test_node(Some(1), None, None);
+        let l2 = make_test_node(Some(2), None, None);
+        let root = make_test_node(None, Some(l1), Some(l2));
+        
+        assert_eq!(root.size(), 2);
+        assert_eq!(root.mask(), &(BigUint::from(1u32) | BigUint::from(2u32)));
+    }
+
+    #[test]
+    fn test_cut_leaf() {
+        let l1 = make_test_node(Some(1), None, None);
+        let l2 = make_test_node(Some(2), None, None);
+        let l3 = make_test_node(Some(3), None, None);
+        let inner = make_test_node(None, Some(l1), Some(l2));
+        let root = make_test_node(None, Some(inner), Some(l3));
+        
+        // Cutting 1 should leave (2,3)
+        let after_1 = cut_leaf(&root, 1).unwrap();
+        assert_eq!(after_1.size(), 2);
+        let leaves = get_all_leaves(&after_1);
+        assert!(leaves.contains(&2));
+        assert!(leaves.contains(&3));
+        assert!(!leaves.contains(&1));
+    }
+
+    #[test]
+    fn test_collect_cherries() {
+        let l1 = make_test_node(Some(1), None, None);
+        let l2 = make_test_node(Some(2), None, None);
+        let root = make_test_node(None, Some(l1), Some(l2));
+        
+        let mut cherries = HashSet::new();
+        collect_cherries(&root, &mut cherries);
+        assert_eq!(cherries.len(), 1);
+        assert!(cherries.contains(&(1, 2)));
+    }
+}
+
 pub fn get_cluster_masks(tree: &Arc<Tree>, masks: &mut HashSet<BigUint>) {
     masks.insert(tree.mask().clone());
     if let Tree::Node(l, r, _, _) = tree.as_ref() {

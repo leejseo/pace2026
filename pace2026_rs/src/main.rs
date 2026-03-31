@@ -122,7 +122,6 @@ fn solve_partition(tree1: Arc<Tree>, tree2: Arc<Tree>, n_leaves: u32, limit_seco
                 collect_leaves(&last_exp, &mut s);
                 p.push(s);
                 
-                // Aggressive Greedy Merge
                 p = merge_partitions(p, ot1, ot2);
                 
                 let mut bc = best_count.lock().unwrap();
@@ -169,5 +168,48 @@ fn collect_leaves(exp: &Expansion, set: &mut HashSet<u32>) {
     match exp {
         Expansion::Leaf(id) => { set.insert(*id); }
         Expansion::Node(l, r) => { collect_leaves(l, set); collect_leaves(r, set); }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_isomorphism() {
+        let t1 = Expansion::Node(Box::new(Expansion::Leaf(1)), Box::new(Expansion::Leaf(2)));
+        let t2 = Expansion::Node(Box::new(Expansion::Leaf(2)), Box::new(Expansion::Leaf(1)));
+        assert!(are_isomorphic(&t1, &t2));
+
+        let t3 = Expansion::Node(
+            Box::new(Expansion::Leaf(1)),
+            Box::new(Expansion::Node(Box::new(Expansion::Leaf(2)), Box::new(Expansion::Leaf(3))))
+        );
+        let t4 = Expansion::Node(
+            Box::new(Expansion::Node(Box::new(Expansion::Leaf(2)), Box::new(Expansion::Leaf(3)))),
+            Box::new(Expansion::Leaf(1))
+        );
+        assert!(are_isomorphic(&t3, &t4));
+    }
+
+    #[test]
+    fn test_merge_partitions_basic() {
+        let mut p = Vec::new();
+        let mut s1 = HashSet::new(); s1.insert(1);
+        let mut s2 = HashSet::new(); s2.insert(2);
+        p.push(s1);
+        p.push(s2);
+
+        let ot1 = OriginalNode {
+            left: Some(Box::new(OriginalNode { left: None, right: None, label: Some(1) })),
+            right: Some(Box::new(OriginalNode { left: None, right: None, label: Some(2) })),
+            label: None,
+        };
+        let ot2 = ot1.clone();
+
+        let merged = merge_partitions(p, &ot1, &ot2);
+        assert_eq!(merged.len(), 1);
+        assert!(merged[0].contains(&1));
+        assert!(merged[0].contains(&2));
     }
 }

@@ -36,7 +36,6 @@ pub fn normalize_state(mut state: State) -> State {
         let mut common = Vec::new();
         for (mask, node) in m1.iter() {
             if node.size() > 1 && m2.contains_key(mask) {
-                // Ensure topologies are also isomorphic
                 if are_topologies_same(node, m2.get(mask).unwrap(), &state.expansions) {
                     common.push((mask.clone(), node.size()));
                 }
@@ -45,7 +44,7 @@ pub fn normalize_state(mut state: State) -> State {
         
         if common.is_empty() { break; }
         
-        common.sort_by_key(|x| x.1); // Smallest clusters first
+        common.sort_by_key(|x| x.1);
         let (target_mask, _) = &common[0];
         let target_node = m1.get(target_mask).unwrap();
         
@@ -108,5 +107,66 @@ fn contract_cluster(tree: &Arc<Tree>, target_mask: &BigUint, new_id: u32) -> Arc
             let ns = nl.size() + nr.size();
             Arc::new(Tree::Node(nl, nr, nm, ns))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tree::{Tree};
+    use num_bigint::BigUint;
+
+    fn leaf(id: u32) -> Arc<Tree> {
+        Arc::new(Tree::Leaf(id, BigUint::from(1u32) << (id - 1)))
+    }
+
+    fn node(l: Arc<Tree>, r: Arc<Tree>) -> Arc<Tree> {
+        let m = l.mask() | r.mask();
+        let s = l.size() + r.size();
+        Arc::new(Tree::Node(l, r, m, s))
+    }
+
+    #[test]
+    fn test_normalize_cherry() {
+        let t1 = node(leaf(1), leaf(2));
+        let t2 = node(leaf(1), leaf(2));
+        let mut expansions = HashMap::new();
+        expansions.insert(1, Expansion::Leaf(1));
+        expansions.insert(2, Expansion::Leaf(2));
+        
+        let state = State {
+            tree1: t1,
+            tree2: t2,
+            expansions,
+            next_id: 3,
+            cut_components: Vec::new(),
+            cached_score: (0, 0, 0),
+        };
+        
+        let norm = normalize_state(state);
+        assert!(norm.tree1.is_leaf());
+        assert_eq!(norm.tree1.leaf_id(), 3);
+    }
+
+    #[test]
+    fn test_compute_score() {
+        let t1 = node(leaf(1), leaf(2));
+        let t2 = node(leaf(1), leaf(2));
+        let mut expansions = HashMap::new();
+        expansions.insert(1, Expansion::Leaf(1));
+        expansions.insert(2, Expansion::Leaf(2));
+        
+        let state = State {
+            tree1: t1,
+            tree2: t2,
+            expansions,
+            next_id: 3,
+            cut_components: Vec::new(),
+            cached_score: (0, 0, 0),
+        };
+        
+        let score = state.compute_score();
+        assert_eq!(score.0, 2);
+        assert_eq!(score.1, -3);
     }
 }
