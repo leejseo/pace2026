@@ -80,42 +80,6 @@ pub fn cut_leaf(tree: &Arc<Tree>, leaf_id: u32) -> Option<Arc<Tree>> {
     }
 }
 
-pub fn path_to_leaf(tree: &Arc<Tree>, target_leaf: u32) -> Vec<(Arc<Tree>, usize)> {
-    let mut path = Vec::new();
-    let mut curr = tree.clone();
-    let target_mask = BigUint::from(1u32) << (target_leaf - 1);
-    while let Tree::Node(l, r, _, _) = curr.as_ref() {
-        if !(l.mask() & &target_mask).is_zero() {
-            path.push((curr.clone(), 0)); curr = l.clone();
-        } else if !(r.mask() & &target_mask).is_zero() {
-            path.push((curr.clone(), 1)); curr = r.clone();
-        } else { break; }
-    }
-    path
-}
-
-pub fn offpath_candidates(tree: &Arc<Tree>, a: u32, b: u32) -> Vec<Arc<Tree>> {
-    let path_a = path_to_leaf(tree, a);
-    let path_b = path_to_leaf(tree, b);
-    let mut i = 0;
-    while i < path_a.len() && i < path_b.len() {
-        if Arc::ptr_eq(&path_a[i].0, &path_b[i].0) && path_a[i].1 == path_b[i].1 { i += 1; }
-        else { break; }
-    }
-    let mut candidates = Vec::new();
-    for (p, side) in path_a.iter().skip(i) {
-        if let Tree::Node(l, r, _, _) = p.as_ref() {
-            candidates.push(if *side == 0 { r.clone() } else { l.clone() });
-        }
-    }
-    for (p, side) in path_b.iter().skip(i) {
-        if let Tree::Node(l, r, _, _) = p.as_ref() {
-            candidates.push(if *side == 0 { r.clone() } else { l.clone() });
-        }
-    }
-    candidates
-}
-
 pub fn get_all_leaves(tree: &Arc<Tree>) -> Vec<u32> {
     let mut leaves = Vec::new();
     let mut mask = tree.mask().clone();
@@ -125,62 +89,6 @@ pub fn get_all_leaves(tree: &Arc<Tree>) -> Vec<u32> {
         mask >>= 1; idx += 1;
     }
     leaves
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn make_test_node(label: Option<u32>, left: Option<Arc<Tree>>, right: Option<Arc<Tree>>) -> Arc<Tree> {
-        if let Some(id) = label {
-            Arc::new(Tree::Leaf(id, BigUint::from(1u32) << (id - 1)))
-        } else {
-            let l = left.unwrap();
-            let r = right.unwrap();
-            let m = l.mask() | r.mask();
-            let s = l.size() + r.size();
-            Arc::new(Tree::Node(l, r, m, s))
-        }
-    }
-
-    #[test]
-    fn test_tree_size_and_mask() {
-        let l1 = make_test_node(Some(1), None, None);
-        let l2 = make_test_node(Some(2), None, None);
-        let root = make_test_node(None, Some(l1), Some(l2));
-        
-        assert_eq!(root.size(), 2);
-        assert_eq!(root.mask(), &(BigUint::from(1u32) | BigUint::from(2u32)));
-    }
-
-    #[test]
-    fn test_cut_leaf() {
-        let l1 = make_test_node(Some(1), None, None);
-        let l2 = make_test_node(Some(2), None, None);
-        let l3 = make_test_node(Some(3), None, None);
-        let inner = make_test_node(None, Some(l1), Some(l2));
-        let root = make_test_node(None, Some(inner), Some(l3));
-        
-        // Cutting 1 should leave (2,3)
-        let after_1 = cut_leaf(&root, 1).unwrap();
-        assert_eq!(after_1.size(), 2);
-        let leaves = get_all_leaves(&after_1);
-        assert!(leaves.contains(&2));
-        assert!(leaves.contains(&3));
-        assert!(!leaves.contains(&1));
-    }
-
-    #[test]
-    fn test_collect_cherries() {
-        let l1 = make_test_node(Some(1), None, None);
-        let l2 = make_test_node(Some(2), None, None);
-        let root = make_test_node(None, Some(l1), Some(l2));
-        
-        let mut cherries = HashSet::new();
-        collect_cherries(&root, &mut cherries);
-        assert_eq!(cherries.len(), 1);
-        assert!(cherries.contains(&(1, 2)));
-    }
 }
 
 pub fn get_cluster_masks(tree: &Arc<Tree>, masks: &mut HashSet<BigUint>) {
