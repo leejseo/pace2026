@@ -39,17 +39,25 @@ fn run(time_limit: u64) -> Result<()> {
     let t1 = original_to_tree(&instance.tree1);
     let t2 = original_to_tree(&instance.tree2);
     
-    // Stage 1: Get a base partition (Anytime search)
-    let partition = solve_partition(t1, t2, instance.n_leaves, time_limit);
+    let partition = solve_partition(t1, t2, instance.n_leaves, time_limit, &instance.tree1, &instance.tree2);
     
-    // Stage 2: Post-process (Greedy Merge to fix over-cutting)
-    // For now, we use the induced subtree of T1 for each leaf set in the partition.
     for leaf_set in partition {
         if let Some(exp) = build_induced_expansion(&instance.tree1, &leaf_set) {
             println!("{};", render_expansion(&exp));
         }
     }
     Ok(())
+}
+
+fn are_isomorphic(n1: &Expansion, n2: &Expansion) -> bool {
+    match (n1, n2) {
+        (Expansion::Leaf(id1), Expansion::Leaf(id2)) => id1 == id2,
+        (Expansion::Node(l1, r1), Expansion::Node(l2, r2)) => {
+            (are_isomorphic(l1, l2) && are_isomorphic(r1, r2)) || 
+            (are_isomorphic(l1, r2) && are_isomorphic(r1, l2))
+        }
+        _ => false,
+    }
 }
 
 fn build_induced_expansion(node: &OriginalNode, leaves: &HashSet<u32>) -> Option<Expansion> {
@@ -65,7 +73,7 @@ fn build_induced_expansion(node: &OriginalNode, leaves: &HashSet<u32>) -> Option
     }
 }
 
-fn solve_partition(tree1: Arc<Tree>, tree2: Arc<Tree>, n_leaves: u32, limit_seconds: u64) -> Vec<HashSet<u32>> {
+fn solve_partition(tree1: Arc<Tree>, tree2: Arc<Tree>, n_leaves: u32, limit_seconds: u64, ot1: &OriginalNode, ot2: &OriginalNode) -> Vec<HashSet<u32>> {
     let start_time = Instant::now();
     let deadline = start_time + Duration::from_secs(limit_seconds);
     let mut expansions = HashMap::new();
@@ -103,32 +111,58 @@ fn solve_partition(tree1: Arc<Tree>, tree2: Arc<Tree>, n_leaves: u32, limit_seco
             }
             
             if curr.tree1.is_leaf() {
-                let mut leaf_sets = Vec::new();
+                let mut p = Vec::new();
                 for comp in &curr.cut_components {
                     let mut s = HashSet::new(); collect_leaves(comp, &mut s);
-                    leaf_sets.push(s);
+                    p.push(s);
                 }
                 let mut s = HashSet::new();
                 let rid = curr.tree1.leaf_id();
                 let last_exp = curr.expansions.get(&rid).cloned().unwrap_or(Expansion::Leaf(rid));
                 collect_leaves(&last_exp, &mut s);
-                leaf_sets.push(s);
+                p.push(s);
+                
+                // Aggressive Greedy Merge
+                p = merge_partitions(p, ot1, ot2);
                 
                 let mut bc = best_count.lock().unwrap();
-                if leaf_sets.len() < *bc {
-                    *bc = leaf_sets.len();
-                    *best_partition.lock().unwrap() = leaf_sets;
+                if p.len() < *bc {
+                    *bc = p.len();
+                    *best_partition.lock().unwrap() = p;
                 }
             }
         }
     });
 
     let res = best_partition.lock().unwrap().clone();
-    if res.is_empty() {
-        (1..=n_leaves).map(|i| { let mut s = HashSet::new(); s.insert(i); s }).collect()
-    } else {
-        res
+    if res.is_empty() { (1..=n_leaves).map(|i| { let mut s = HashSet::new(); s.insert(i); s }).collect() } else { res }
+}
+
+fn merge_partitions(mut p: Vec<HashSet<u32>>, ot1: &OriginalNode, ot2: &OriginalNode) -> Vec<HashSet<u32>> {
+    let mut changed = true;
+    while changed {
+        changed = false;
+        let mut i = 0;
+        while i < p.len() {
+            let mut j = i + 1;
+            while j < p.len() {
+                let mut merged = p[i].clone();
+                merged.extend(&p[j]);
+                
+                if let (Some(e1), Some(e2)) = (build_induced_expansion(ot1, &merged), build_induced_expansion(ot2, &merged)) {
+                    if are_isomorphic(&e1, &e2) {
+                        p[i] = merged;
+                        p.remove(j);
+                        changed = true;
+                        continue;
+                    }
+                }
+                j += 1;
+            }
+            i += 1;
+        }
     }
+    p
 }
 
 fn collect_leaves(exp: &Expansion, set: &mut HashSet<u32>) {
