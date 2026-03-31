@@ -1,3 +1,9 @@
+# Virtual Environment
+.venv/
+env/
+venv/
+ENV/
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
@@ -6,6 +12,7 @@ __pycache__/
 # Rust
 target/
 **/*.rs.bk
+Cargo.lock
 
 # PACE Instances & Data
 instances/
@@ -13,7 +20,15 @@ instances/
 *.in
 *.gr
 
-# Local Documentation (As requested)
+# Results & Logs
+results/benchmark_*.txt
+trace_*.py
+evaluate_*.py
+compare_times.py
+benchmark.py
+ITERATION_LOG.md
+
+# Local Documentation
 docs/
 
 # OS generated files
@@ -22,8 +37,3 @@ docs/
 ehthumbs.db
 Icon?
 Thumbs.db
-
-# Evaluation scripts & Trace logs
-trace_*.py
-evaluate_*.py
-ITERATION_LOG.md
