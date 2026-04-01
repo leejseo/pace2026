@@ -1,3 +1,4 @@
+use std::collections::{hash_map::DefaultHasher, HashMap};
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
@@ -47,7 +48,6 @@ impl Expansion {
         let h1 = l.hash_val();
         let h2 = r.hash_val();
         let (min_h, max_h) = if h1 < h2 { (h1, h2) } else { (h2, h1) };
-        // Truly deterministic hash: combine min and max in a fixed order
         let hfinal = min_h.wrapping_mul(6364136223846793005)
             .wrapping_add(max_h)
             .wrapping_add(1442695040888963407);
@@ -86,6 +86,13 @@ pub fn original_to_tree(node: &OriginalNode, n_leaves: u32) -> Arc<Tree> {
     build(node, bitset_size)
 }
 
+pub fn tree_to_expansion(tree: &Arc<Tree>) -> Expansion {
+    match tree.as_ref() {
+        Tree::Leaf(id, _) => Expansion::Leaf(*id),
+        Tree::Node(l, r, _, _) => Expansion::new_node(tree_to_expansion(l), tree_to_expansion(r)),
+    }
+}
+
 pub fn cut_leaf(tree: &Arc<Tree>, leaf_id: u32) -> Option<Arc<Tree>> {
     match tree.as_ref() {
         Tree::Leaf(id, _) => if *id == leaf_id { None } else { Some(tree.clone()) },
@@ -122,6 +129,7 @@ pub fn path_to_leaf(tree: &Arc<Tree>, target_leaf: u32) -> Vec<(Arc<Tree>, usize
 pub fn offpath_candidates(tree: &Arc<Tree>, a: u32, b: u32) -> Vec<Arc<Tree>> {
     let path_a = path_to_leaf(tree, a);
     let path_b = path_to_leaf(tree, b);
+    if path_a.is_empty() || path_b.is_empty() { return Vec::new(); }
     let mut lca_idx = 0;
     while lca_idx + 1 < path_a.len() && lca_idx + 1 < path_b.len() && Arc::ptr_eq(&path_a[lca_idx + 1].0, &path_b[lca_idx + 1].0) {
         lca_idx += 1;
@@ -129,14 +137,16 @@ pub fn offpath_candidates(tree: &Arc<Tree>, a: u32, b: u32) -> Vec<Arc<Tree>> {
     let mut candidates = Vec::new();
     for i in lca_idx..path_a.len() {
         if let Tree::Node(l, r, _, _) = path_a[i].0.as_ref() {
-            let side = path_a[i].1;
-            candidates.push(if side == 0 { r.clone() } else { l.clone() });
+            let on_path_side = path_a[i].1;
+            let off_path_node = if on_path_side == 0 { r.clone() } else { l.clone() };
+            if !off_path_node.mask().get(b) { candidates.push(off_path_node); }
         }
     }
     for i in lca_idx..path_b.len() {
         if let Tree::Node(l, r, _, _) = path_b[i].0.as_ref() {
-            let side = path_b[i].1;
-            candidates.push(if side == 0 { r.clone() } else { l.clone() });
+            let on_path_side = path_b[i].1;
+            let off_path_node = if on_path_side == 0 { r.clone() } else { l.clone() };
+            if !off_path_node.mask().get(a) { candidates.push(off_path_node); }
         }
     }
     candidates
