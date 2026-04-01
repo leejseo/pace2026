@@ -19,3 +19,23 @@
 ## Iteration 5: Parallel Local Search Diversification
 - **Task**: Assign different ALNS parameters (destroy rate, cooling schedule aggressiveness) to different threads to diversify the search space exploration.
 - **Goal**: Prevent all threads from getting stuck in the same local optima.
+
+## Iteration 6: Leaf Depth Discordance Calculation
+- **Task**: Precompute the topological depth of every leaf in $T_1$ and $T_2$. Calculate the absolute difference (discordance).
+- **Goal**: Provide a fast, $O(1)$ heuristic metric to identify which leaves are structurally consistent between the two trees.
+
+## Iteration 7: Discordance-Biased ALNS Repair
+- **Task**: When the ALNS repair operator builds new components, sort the pool of available leaves by their discordance score (ascending). 
+- **Goal**: Force the greedy builder to construct the "core" agreement forest first using the most consistent leaves, leaving highly discordant leaves as singletons or small components.
+
+## Iteration 8: Exhaustive Pairwise Merging at Low Temperatures
+- **Task**: When the SA temperature drops below a certain threshold, switch the local search from random polling to an exhaustive $O(K^2)$ check of all component pairs.
+- **Goal**: Ensure no trivial merges are missed at the end of the search, squeezing out the last few component reductions.
+
+## Iteration 9: Targeted Destruction of Failed Merges
+- **Task**: Track pairs of components that fail the isomorphism check during merging. Use these "near-misses" as targets for the destroy operator.
+- **Goal**: Focus destruction on the boundaries between large components to facilitate their eventual union.
+
+## Iteration 10: Multi-Phase Anytime Execution
+- **Task**: Structure the 5-minute run into distinct phases (Broad Exploration -> Intense Exploitation -> Final Exhaustive Polish) using the time limit.
+- **Goal**: Guarantee the absolute minimum component count before the process terminates.

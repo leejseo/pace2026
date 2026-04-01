@@ -35,11 +35,21 @@ fn run(time_limit: u64) -> Result<()> {
     let mut labels = HashSet::new(); get_labels(&instance.tree1, &mut labels);
     let n_leaves = labels.len() as u32;
     
+    // Compute Leaf Depth Discordance
+    let mut d1 = HashMap::new(); compute_depths(&instance.tree1, 0, &mut d1);
+    let mut d2 = HashMap::new(); compute_depths(&instance.tree2, 0, &mut d2);
+    let mut discordance = HashMap::new();
+    for &l in &labels {
+        let depth1 = *d1.get(&l).unwrap_or(&0) as i32;
+        let depth2 = *d2.get(&l).unwrap_or(&0) as i32;
+        discordance.insert(l, (depth1 - depth2).abs());
+    }
+
     let t1 = original_to_tree(&instance.tree1, n_leaves);
     let t2 = original_to_tree(&instance.tree2, n_leaves);
 
     let initial_clusters = get_mcsr_clusters_safe(&t1, &t2, n_leaves, &labels);
-    let partition = solve_maf_alns_sa_final(&t1, &t2, initial_clusters, time_limit, n_leaves);
+    let partition = solve_maf_alns_sa_final(&t1, &t2, initial_clusters, time_limit, n_leaves, &discordance);
     
     let out = stdout();
     let mut writer = BufWriter::new(out.lock());
@@ -53,6 +63,15 @@ fn run(time_limit: u64) -> Result<()> {
     }
     writer.flush()?;
     Ok(())
+}
+
+fn compute_depths(node: &OriginalNode, depth: usize, map: &mut HashMap<u32, usize>) {
+    if let Some(id) = node.label {
+        map.insert(id, depth);
+    } else {
+        if let Some(ref l) = node.left { compute_depths(l, depth + 1, map); }
+        if let Some(ref r) = node.right { compute_depths(r, depth + 1, map); }
+    }
 }
 
 fn get_labels(node: &OriginalNode, set: &mut HashSet<u32>) {
@@ -105,7 +124,7 @@ fn get_mcsr_clusters_safe(t1: &Arc<Tree>, t2: &Arc<Tree>, n_leaves: u32, all_lab
     result
 }
 
-fn solve_maf_alns_sa_final(t1: &Arc<Tree>, t2: &Arc<Tree>, initial: Vec<HashSet<u32>>, limit_seconds: u64, n_leaves: u32) -> Vec<HashSet<u32>> {
+fn solve_maf_alns_sa_final(t1: &Arc<Tree>, t2: &Arc<Tree>, initial: Vec<HashSet<u32>>, limit_seconds: u64, n_leaves: u32, discordance: &HashMap<u32, i32>) -> Vec<HashSet<u32>> {
     let start_time = Instant::now();
     let deadline = start_time + Duration::from_secs(limit_seconds);
     let best_partition_shared = Arc::new(Mutex::new(initial.clone()));
@@ -115,15 +134,27 @@ fn solve_maf_alns_sa_final(t1: &Arc<Tree>, t2: &Arc<Tree>, initial: Vec<HashSet<
         let mut rng = rand::rng();
         let mut current = initial.clone();
         let mut current_count = current.len();
-        
-        // DIVERSIFICATION
-        let t_mult = 5.0 + (thread_id as f64 * 5.0);
-        let destroy_base = 0.02 + (thread_id as f64 * 0.01);
-        let destroy_max = destroy_base + 0.15;
 
         while Instant::now() < deadline {
             let mut next = current.clone();
             
+            let elapsed = start_time.elapsed().as_secs_f64();
+            let progress = elapsed / limit_seconds as f64;
+
+            // Iteration 10: Multi-Phase Anytime Execution
+            let (phase_destroy_base, phase_destroy_max, allow_sa) = if progress < 0.6 {
+                (0.05, 0.25, true)
+            } else if progress < 0.9 {
+                (0.01, 0.10, true)
+            } else {
+                (0.01, 0.05, false) 
+            };
+
+            let destroy_base = phase_destroy_base + (thread_id as f64 * 0.01);
+            let destroy_max = destroy_base + phase_destroy_max;
+            let t_mult = 5.0 + (thread_id as f64 * 5.0);
+            let dynamic_temp = 1.0 * (1.0 - progress).max(0.001);
+
             // ADAPTIVE DESTROY
             let strategy = rng.random_range(0..3);
             let removed = match strategy {
@@ -149,10 +180,13 @@ fn solve_maf_alns_sa_final(t1: &Arc<Tree>, t2: &Arc<Tree>, initial: Vec<HashSet<
                 }
             };
 
-            // REPAIR: Greedily expand up to a size limit
+            // REPAIR: Discordance-biased expand
             if !removed.is_empty() {
                 let mut pool_vec: Vec<u32> = removed.iter().cloned().collect();
                 pool_vec.shuffle(&mut rng);
+                pool_vec.sort_by_key(|l| *discordance.get(l).unwrap_or(&0));
+                pool_vec.reverse();
+                
                 while !pool_vec.is_empty() {
                     let mut comp = HashSet::new(); comp.insert(pool_vec.pop().unwrap());
                     let mut subset_mask = FastBitSet::new(n_leaves * 3);
@@ -164,7 +198,7 @@ fn solve_maf_alns_sa_final(t1: &Arc<Tree>, t2: &Arc<Tree>, initial: Vec<HashSet<
                         subset_mask.set(pool_vec[i]);
                         
                         if is_truly_isomorphic_fast(t1, t2, &comp, &subset_mask) { 
-                            pool_vec.swap_remove(i); 
+                            pool_vec.remove(i); 
                         } else { 
                             comp.remove(&pool_vec[i]); 
                             subset_mask = FastBitSet::new(n_leaves * 3);
@@ -178,28 +212,51 @@ fn solve_maf_alns_sa_final(t1: &Arc<Tree>, t2: &Arc<Tree>, initial: Vec<HashSet<
             }
 
             // LOCAL MERGE
-            for _ in 0..100 {
-                if next.len() <= 1 { break; }
-                let i = rng.random_range(0..next.len());
-                let j = (i + rng.random_range(1..next.len())) % next.len();
-                let mut merged = next[i].clone(); merged.extend(&next[j]);
-                let mut subset_mask = FastBitSet::new(n_leaves * 3);
-                for &l in &merged { subset_mask.set(l); }
-                
-                if is_truly_isomorphic_fast(t1, t2, &merged, &subset_mask) {
-                    let (f, s) = if i > j { (i, j) } else { (j, i) };
-                    next.remove(f); next.remove(s); next.push(merged);
+            if dynamic_temp < 0.05 {
+                let mut changed = true;
+                while changed && Instant::now() < deadline {
+                    changed = false;
+                    let mut i = 0;
+                    while i < next.len() && Instant::now() < deadline {
+                        let mut j = i + 1;
+                        let mut merged_flag = false;
+                        while j < next.len() {
+                            let mut merged = next[i].clone(); merged.extend(&next[j]);
+                            let mut subset_mask = FastBitSet::new(n_leaves * 3);
+                            for &l in &merged { subset_mask.set(l); }
+                            
+                            if is_truly_isomorphic_fast(t1, t2, &merged, &subset_mask) {
+                                next.remove(j);
+                                next[i] = merged;
+                                changed = true;
+                                merged_flag = true;
+                                break;
+                            }
+                            j += 1;
+                        }
+                        if !merged_flag { i += 1; }
+                    }
+                }
+            } else {
+                for _ in 0..100 {
+                    if next.len() <= 1 { break; }
+                    let i = rng.random_range(0..next.len());
+                    let j = (i + rng.random_range(1..next.len())) % next.len();
+                    let mut merged = next[i].clone(); merged.extend(&next[j]);
+                    let mut subset_mask = FastBitSet::new(n_leaves * 3);
+                    for &l in &merged { subset_mask.set(l); }
+                    
+                    if is_truly_isomorphic_fast(t1, t2, &merged, &subset_mask) {
+                        let (f, s) = if i > j { (i, j) } else { (j, i) };
+                        next.remove(f); next.remove(s); next.push(merged);
+                    }
                 }
             }
 
             let next_count = next.len();
             let delta = next_count as f64 - current_count as f64;
             
-            let elapsed = start_time.elapsed().as_secs_f64();
-            let progress = elapsed / limit_seconds as f64;
-            let dynamic_temp = 1.0 * (1.0 - progress).max(0.001);
-            
-            if delta <= 0.0 || rng.random_bool((-delta / (dynamic_temp * t_mult)).exp().clamp(0.0, 1.0)) {
+            if delta <= 0.0 || (allow_sa && rng.random_bool((-delta / (dynamic_temp * t_mult)).exp().clamp(0.0, 1.0))) {
                 current = next; current_count = next_count;
                 let mut bc = best_count_shared.lock().unwrap();
                 if current_count < *bc {
@@ -208,7 +265,6 @@ fn solve_maf_alns_sa_final(t1: &Arc<Tree>, t2: &Arc<Tree>, initial: Vec<HashSet<
                     eprintln!("New best (ALNS-SA): {}", *bc);
                 }
             }
-            
             if rng.random_bool(0.01) {
                 current = best_partition_shared.lock().unwrap().clone();
                 current_count = current.len();
