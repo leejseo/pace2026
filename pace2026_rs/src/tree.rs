@@ -1,5 +1,4 @@
-use std::collections::{hash_map::DefaultHasher, HashMap};
-use std::hash::{Hash, Hasher};
+use std::collections::{HashSet, HashMap};
 use std::sync::Arc;
 
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
@@ -86,6 +85,26 @@ pub fn original_to_tree(node: &OriginalNode, n_leaves: u32) -> Arc<Tree> {
     build(node, bitset_size)
 }
 
+pub fn get_hash_map(tree: &Arc<Tree>, map: &mut HashMap<u64, Arc<Tree>>) -> u64 {
+    match tree.as_ref() {
+        Tree::Leaf(id, _) => {
+            let h = *id as u64;
+            map.insert(h, tree.clone());
+            h
+        },
+        Tree::Node(l, r, _, _) => {
+            let h1 = get_hash_map(l, map);
+            let h2 = get_hash_map(r, map);
+            let (min_h, max_h) = if h1 < h2 { (h1, h2) } else { (h2, h1) };
+            let hfinal = min_h.wrapping_mul(6364136223846793005)
+                .wrapping_add(max_h)
+                .wrapping_add(1442695040888963407);
+            map.insert(hfinal, tree.clone());
+            hfinal
+        }
+    }
+}
+
 pub fn tree_to_expansion(tree: &Arc<Tree>) -> Expansion {
     match tree.as_ref() {
         Tree::Leaf(id, _) => Expansion::Leaf(*id),
@@ -93,12 +112,12 @@ pub fn tree_to_expansion(tree: &Arc<Tree>) -> Expansion {
     }
 }
 
-pub fn cut_leaf(tree: &Arc<Tree>, leaf_id: u32) -> Option<Arc<Tree>> {
+pub fn cut_leaf_fixed(tree: &Arc<Tree>, leaf_id: u32) -> Option<Arc<Tree>> {
     match tree.as_ref() {
         Tree::Leaf(id, _) => if *id == leaf_id { None } else { Some(tree.clone()) },
         Tree::Node(l, r, _, _) => {
-            let nl = cut_leaf(l, leaf_id);
-            let nr = cut_leaf(r, leaf_id);
+            let nl = cut_leaf_fixed(l, leaf_id);
+            let nr = cut_leaf_fixed(r, leaf_id);
             match (nl, nr) {
                 (None, None) => None,
                 (Some(t), None) | (None, Some(t)) => Some(t),
@@ -109,6 +128,30 @@ pub fn cut_leaf(tree: &Arc<Tree>, leaf_id: u32) -> Option<Arc<Tree>> {
                     Some(Arc::new(Tree::Node(tl, tr, Arc::new(m), sz)))
                 }
             }
+        }
+    }
+}
+
+pub fn contract_cherry_internal(tree: &Arc<Tree>, a: u32, b: u32, new_id: u32, n_leaves: u32) -> Arc<Tree> {
+    match tree.as_ref() {
+        Tree::Leaf(id, _) => if *id == a || *id == b { 
+            let mut m = FastBitSet::new(n_leaves*3); m.set(new_id);
+            Arc::new(Tree::Leaf(new_id, Arc::new(m)))
+        } else { tree.clone() },
+        Tree::Node(l, r, _, _) => {
+            if l.is_leaf() && r.is_leaf() {
+                let (id_l, id_r) = (l.leaf_id(), r.leaf_id());
+                if (id_l == a && id_r == b) || (id_l == b && id_r == a) {
+                    let mut m = FastBitSet::new(n_leaves*3); m.set(new_id);
+                    return Arc::new(Tree::Leaf(new_id, Arc::new(m)));
+                }
+            }
+            let nl = contract_cherry_internal(l, a, b, new_id, n_leaves);
+            let nr = contract_cherry_internal(r, a, b, new_id, n_leaves);
+            if Arc::ptr_eq(&nl, l) && Arc::ptr_eq(&nr, r) { return tree.clone(); }
+            let m = nl.mask().or(nr.mask());
+            let sz = nl.size() + nr.size();
+            Arc::new(Tree::Node(nl, nr, Arc::new(m), sz))
         }
     }
 }
@@ -137,16 +180,16 @@ pub fn offpath_candidates(tree: &Arc<Tree>, a: u32, b: u32) -> Vec<Arc<Tree>> {
     let mut candidates = Vec::new();
     for i in lca_idx..path_a.len() {
         if let Tree::Node(l, r, _, _) = path_a[i].0.as_ref() {
-            let on_path_side = path_a[i].1;
-            let off_path_node = if on_path_side == 0 { r.clone() } else { l.clone() };
-            if !off_path_node.mask().get(b) { candidates.push(off_path_node); }
+            let side = path_a[i].1;
+            let off = if side == 0 { r.clone() } else { l.clone() };
+            if !off.mask().get(b) { candidates.push(off); }
         }
     }
     for i in lca_idx..path_b.len() {
         if let Tree::Node(l, r, _, _) = path_b[i].0.as_ref() {
-            let on_path_side = path_b[i].1;
-            let off_path_node = if on_path_side == 0 { r.clone() } else { l.clone() };
-            if !off_path_node.mask().get(a) { candidates.push(off_path_node); }
+            let side = path_b[i].1;
+            let off = if side == 0 { r.clone() } else { l.clone() };
+            if !off.mask().get(a) { candidates.push(off); }
         }
     }
     candidates
@@ -162,4 +205,22 @@ pub fn get_all_leaves(tree: &Arc<Tree>) -> Vec<u32> {
         }
     }
     leaves
+}
+
+pub fn replace_subtree_fast(tree: &Arc<Tree>, target_hash: u64, new_id: u32, n_leaves: u32) -> Arc<Tree> {
+    if tree_to_expansion(tree).hash_val() == target_hash {
+        let mut m = FastBitSet::new(n_leaves * 3); m.set(new_id);
+        return Arc::new(Tree::Leaf(new_id, Arc::new(m)));
+    }
+    match tree.as_ref() {
+        Tree::Leaf(_, _) => tree.clone(),
+        Tree::Node(l, r, _, _) => {
+            let nl = replace_subtree_fast(l, target_hash, new_id, n_leaves);
+            let nr = replace_subtree_fast(r, target_hash, new_id, n_leaves);
+            if Arc::ptr_eq(&nl, l) && Arc::ptr_eq(&nr, r) { return tree.clone(); }
+            let m = nl.mask().or(nr.mask());
+            let sz = nl.size() + nr.size();
+            Arc::new(Tree::Node(nl, nr, Arc::new(m), sz))
+        }
+    }
 }
