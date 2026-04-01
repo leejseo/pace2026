@@ -10,48 +10,48 @@ pub struct Instance {
 }
 
 pub fn parse_newick(text: &str) -> Result<OriginalNode> {
+    let mut stack: Vec<Vec<OriginalNode>> = Vec::new();
+    let mut current_nodes = Vec::new();
+    
     let chars: Vec<char> = text.chars().filter(|c| !c.is_whitespace()).collect();
-    let mut pos = 0;
+    let mut i = 0;
     
-    fn parse_subtree(chars: &[char], pos: &mut usize) -> Result<OriginalNode> {
-        if *pos >= chars.len() {
-            bail!("Unexpected end of input");
-        }
-        let ch = chars[*pos];
-        if ch.is_ascii_digit() {
-            let start = *pos;
-            while *pos < chars.len() && chars[*pos].is_ascii_digit() {
-                *pos += 1;
-            }
-            let num_str: String = chars[start..*pos].iter().collect();
-            let label = num_str.parse::<u32>()?;
-            return Ok(OriginalNode { left: None, right: None, label: Some(label) });
-        }
-        
+    while i < chars.len() {
+        let ch = chars[i];
         if ch == '(' {
-            *pos += 1; // skip '('
-            let left = parse_subtree(chars, pos)?;
-            if chars[*pos] != ',' {
-                bail!("Expected ','");
+            stack.push(current_nodes);
+            current_nodes = Vec::new();
+            i += 1;
+        } else if ch.is_ascii_digit() {
+            let start = i;
+            while i < chars.len() && chars[i].is_ascii_digit() {
+                i += 1;
             }
-            *pos += 1; // skip ','
-            let right = parse_subtree(chars, pos)?;
-            if chars[*pos] != ')' {
-                bail!("Expected ')'");
+            let label: u32 = chars[start..i].iter().collect::<String>().parse()?;
+            current_nodes.push(OriginalNode { left: None, right: None, label: Some(label) });
+        } else if ch == ',' {
+            i += 1;
+        } else if ch == ')' {
+            if current_nodes.len() != 2 {
+                bail!("Expected exactly 2 children in Newick, found {}", current_nodes.len());
             }
-            *pos += 1; // skip ')'
-            return Ok(OriginalNode { left: Some(Box::new(left)), right: Some(Box::new(right)), label: None });
+            let right = current_nodes.pop().unwrap();
+            let left = current_nodes.pop().unwrap();
+            let node = OriginalNode { left: Some(Box::new(left)), right: Some(Box::new(right)), label: None };
+            current_nodes = stack.pop().ok_or_else(|| anyhow::anyhow!("Unexpected ')'"))?;
+            current_nodes.push(node);
+            i += 1;
+        } else if ch == ';' {
+            break;
+        } else {
+            i += 1; // Ignore other characters or bail? Let's just skip for robustness
         }
-        
-        bail!("Unexpected character {}", ch);
     }
     
-    let root = parse_subtree(&chars, &mut pos)?;
-    if pos < chars.len() && chars[pos] == ';' {
-        Ok(root)
-    } else {
-        bail!("Expected ';' at end")
+    if current_nodes.len() != 1 {
+        bail!("Expected single root node, found {}", current_nodes.len());
     }
+    Ok(current_nodes.pop().unwrap())
 }
 
 pub fn parse_instance_file(path: &str) -> Result<Instance> {
@@ -82,8 +82,49 @@ pub fn parse_instance_file(path: &str) -> Result<Instance> {
 }
 
 pub fn render_expansion(exp: &crate::tree::Expansion) -> String {
-    match exp {
-        crate::tree::Expansion::Leaf(id) => id.to_string(),
-        crate::tree::Expansion::Node(l, r, _) => format!("({},{})", render_expansion(l), render_expansion(r)),
+    let mut result = String::new();
+    fn recurse(e: &crate::tree::Expansion, res: &mut String) {
+        match e {
+            crate::tree::Expansion::Leaf(id) => { res.push_str(&id.to_string()); }
+            crate::tree::Expansion::Node(l, r, _) => {
+                res.push('(');
+                recurse(l, res);
+                res.push(',');
+                recurse(r, res);
+                res.push(')');
+            }
+        }
+    }
+    recurse(exp, &mut result);
+    result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_deep_newick_parser() {
+        // Create a very deep tree: (((...(1,2),3),4),...N);
+        let n = 10000;
+        let mut s = String::new();
+        for _ in 0..n-1 { s.push('('); }
+        s.push_str("1,2)");
+        for i in 3..=n {
+            s.push_str(&format!(",{})", i));
+        }
+        s.push(';');
+        
+        let res = parse_newick(&s);
+        assert!(res.is_ok());
+        let root = res.unwrap();
+        // Check if it's actually deep by going down the left side
+        let mut curr = &root;
+        let mut depth = 0;
+        while let Some(ref l) = curr.left {
+            curr = l;
+            depth += 1;
+        }
+        assert_eq!(depth, n - 1);
     }
 }

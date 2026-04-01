@@ -87,4 +87,6 @@ def verify_maf(inst_path, output_text):
 
 if __name__ == "__main__":
     if len(sys.argv) == 3:
-        print(verify_maf(sys.argv[1], sys.argv[2]))
+        with open(sys.argv[2], "r") as f:
+            sol_text = f.read()
+        print(verify_maf(sys.argv[1], sol_text))
