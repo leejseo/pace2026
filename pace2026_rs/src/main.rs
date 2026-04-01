@@ -24,7 +24,7 @@ fn main() -> Result<()> {
             if let Ok(limit) = args[i+1].parse() { time_limit = limit; }
         }
     }
-    let safe_limit = if time_limit > 15 { time_limit - 10 } else { time_limit };
+    let safe_limit = if time_limit > 5 { time_limit - 2 } else { time_limit };
     if let Err(e) = run(safe_limit) { eprintln!("Error: {}", e); }
     Ok(())
 }
@@ -35,20 +35,19 @@ fn run(time_limit: u64) -> Result<()> {
     let mut labels = HashSet::new(); get_labels(&instance.tree1, &mut labels);
     let n_leaves = labels.len() as u32;
     
-    // Compute Leaf Depth Discordance
-    let mut d1 = HashMap::new(); compute_depths(&instance.tree1, 0, &mut d1);
-    let mut d2 = HashMap::new(); compute_depths(&instance.tree2, 0, &mut d2);
-    let mut discordance = HashMap::new();
-    for &l in &labels {
-        let depth1 = *d1.get(&l).unwrap_or(&0) as i32;
-        let depth2 = *d2.get(&l).unwrap_or(&0) as i32;
-        discordance.insert(l, (depth1 - depth2).abs());
-    }
-
     let t1 = original_to_tree(&instance.tree1, n_leaves);
     let t2 = original_to_tree(&instance.tree2, n_leaves);
 
-    let initial_clusters = get_mcsr_clusters_safe(&t1, &t2, n_leaves, &labels);
+    // Iteration 11: Compute Ancestral Sharing Weighting
+    let (initial_clusters, ancestral_scores) = get_mcsr_clusters_and_scores(&t1, &t2, n_leaves, &labels);
+    
+    // Invert the score to act like discordance (lower is better for building).
+    let max_score = ancestral_scores.values().max().unwrap_or(&0).clone();
+    let mut discordance = HashMap::new();
+    for (&l, &score) in &ancestral_scores {
+        discordance.insert(l, max_score - score);
+    }
+
     let partition = solve_maf_alns_sa_final(&t1, &t2, initial_clusters, time_limit, n_leaves, &discordance);
     
     let out = stdout();
@@ -63,15 +62,6 @@ fn run(time_limit: u64) -> Result<()> {
     }
     writer.flush()?;
     Ok(())
-}
-
-fn compute_depths(node: &OriginalNode, depth: usize, map: &mut HashMap<u32, usize>) {
-    if let Some(id) = node.label {
-        map.insert(id, depth);
-    } else {
-        if let Some(ref l) = node.left { compute_depths(l, depth + 1, map); }
-        if let Some(ref r) = node.right { compute_depths(r, depth + 1, map); }
-    }
 }
 
 fn get_labels(node: &OriginalNode, set: &mut HashSet<u32>) {
@@ -96,17 +86,25 @@ fn build_induced_expansion_fast(tree: &Arc<Tree>, leaves: &HashSet<u32>, subset_
     }
 }
 
-fn get_mcsr_clusters_safe(t1: &Arc<Tree>, t2: &Arc<Tree>, n_leaves: u32, all_labels: &HashSet<u32>) -> Vec<HashSet<u32>> {
+fn get_mcsr_clusters_and_scores(t1: &Arc<Tree>, t2: &Arc<Tree>, n_leaves: u32, all_labels: &HashSet<u32>) -> (Vec<HashSet<u32>>, HashMap<u32, i32>) {
     let mut sub1 = HashMap::new(); get_hash_map(t1, &mut sub1);
     let mut sub2 = HashMap::new(); get_hash_map(t2, &mut sub2);
     let mut common = Vec::new();
+    let mut ancestral_scores = HashMap::new();
+    for &l in all_labels { ancestral_scores.insert(l, 0); }
+    
     for (hash, node1) in sub1 {
         if sub2.contains_key(&hash) {
             let leaves = get_all_leaves(&node1);
             if leaves.len() > 1 {
                 let s: HashSet<u32> = leaves.into_iter().collect();
                 let mut subset_mask = FastBitSet::new(n_leaves * 3);
-                for &l in &s { subset_mask.set(l); }
+                for &l in &s { 
+                    subset_mask.set(l); 
+                    if let Some(count) = ancestral_scores.get_mut(&l) {
+                        *count += 1;
+                    }
+                }
                 if is_truly_isomorphic_fast(t1, t2, &s, &subset_mask) { common.push(s); }
             }
         }
@@ -121,7 +119,7 @@ fn get_mcsr_clusters_safe(t1: &Arc<Tree>, t2: &Arc<Tree>, n_leaves: u32, all_lab
         }
     }
     for &l in all_labels { if !used.contains(&l) { let mut s = HashSet::new(); s.insert(l); result.push(s); } }
-    result
+    (result, ancestral_scores)
 }
 
 fn solve_maf_alns_sa_final(t1: &Arc<Tree>, t2: &Arc<Tree>, initial: Vec<HashSet<u32>>, limit_seconds: u64, n_leaves: u32, discordance: &HashMap<u32, i32>) -> Vec<HashSet<u32>> {
@@ -213,6 +211,7 @@ fn solve_maf_alns_sa_final(t1: &Arc<Tree>, t2: &Arc<Tree>, initial: Vec<HashSet<
 
             // LOCAL MERGE
             if dynamic_temp < 0.05 {
+                // Iteration 8: Exhaustive Pairwise Merging at Low Temperatures
                 let mut changed = true;
                 while changed && Instant::now() < deadline {
                     changed = false;

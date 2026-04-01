@@ -19,6 +19,35 @@ impl FastBitSet {
         let idx = (bit / 64) as usize;
         if idx < self.words.len() { (self.words[idx] & (1 << (bit % 64))) != 0 } else { false }
     }
+    pub fn and(&self, other: &Self) -> Self {
+        let mut res = self.words.clone();
+        for i in 0..res.len().min(other.words.len()) { res[i] &= other.words[i]; }
+        Self { words: res }
+    }
+    pub fn and_not(&self, other: &Self) -> Self {
+        let mut res = self.words.clone();
+        for i in 0..res.len().min(other.words.len()) { res[i] &= !other.words[i]; }
+        Self { words: res }
+    }
+    pub fn count_ones(&self) -> u32 {
+        self.words.iter().map(|w| w.count_ones()).sum()
+    }
+    pub fn get_set_bits(&self) -> Vec<u32> {
+        let mut res = Vec::new();
+        for (i, &w) in self.words.iter().enumerate() {
+            let mut w = w;
+            while w != 0 {
+                let tz = w.trailing_zeros();
+                res.push((i * 64) as u32 + tz);
+                w &= w - 1;
+            }
+        }
+        res
+    }
+    pub fn clear(&mut self, bit: u32) {
+        let idx = (bit / 64) as usize;
+        if idx < self.words.len() { self.words[idx] &= !(1 << (bit % 64)); }
+    }
     pub fn intersects(&self, other: &Self) -> bool {
         for i in 0..self.words.len().min(other.words.len()) {
             if (self.words[i] & other.words[i]) != 0 { return true; }

@@ -39,3 +39,23 @@
 ## Iteration 10: Multi-Phase Anytime Execution
 - **Task**: Structure the 5-minute run into distinct phases (Broad Exploration -> Intense Exploitation -> Final Exhaustive Polish) using the time limit.
 - **Goal**: Guarantee the absolute minimum component count before the process terminates.
+
+## Iteration 11: Ancestral Sharing Weighting
+- **Task**: Calculate exact shared ancestral cluster count for each leaf between $T_1$ and $T_2$. Prioritize leaves with highest shared ancestry during component building.
+- **Goal**: Build highly stable core agreement subtrees early, drastically reducing fragmentation.
+
+## Iteration 12: Continuous Exhaustive Merging
+- **Task**: Upgrade the local search to perform exhaustive $O(K^2)$ merge attempts continuously rather than just during the final phase.
+- **Goal**: Since $K \approx 200$, 40k pairs is fast enough. Maximizes the component reduction across all phases.
+
+## Iteration 13: Leaf Shift / Relocation Operator
+- **Task**: Introduce an ALNS operator that moves a single leaf from one component to another (if valid).
+- **Goal**: Explore local neighborhoods that are unreachable by pure component merging.
+
+## Iteration 14: Stubborn Component Destruction
+- **Task**: Track components that consistently fail to merge or shift. Target these specific components for ALNS destruction.
+- **Goal**: Break out of severe local optima caused by highly discordant but tightly bound sub-clusters.
+
+## Iteration 15: Cross-Thread Best Partition Seeding
+- **Task**: Allow threads to periodically adopt the *global* best partition rather than just their local best, simulating an evolutionary "migration" or swarm intelligence.
+- **Goal**: Converge all parallel computational power onto the most promising structural backbones.
