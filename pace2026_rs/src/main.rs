@@ -110,18 +110,30 @@ fn solve_maf_alns_sa_final(orig1: &OriginalNode, orig2: &OriginalNode, initial: 
 
         while Instant::now() < deadline {
             let mut next = current.clone();
-            let removed = if rng.random_bool(0.5) {
-                let count = (next.len() as f64 * rng.random_range(0.05..0.20)) as usize;
-                let mut pool = HashSet::new();
-                for _ in 0..count.max(1) { if !next.is_empty() { pool.extend(next.swap_remove(rng.random_range(0..next.len()))); } }
-                pool
-            } else {
-                next.sort_by_key(|s| s.len());
-                let mut pool = HashSet::new();
-                for _ in 0..(next.len() / 4).max(1) { if !next.is_empty() { pool.extend(next.remove(0)); } }
-                pool
+            // ADAPTIVE DESTROY
+            let strategy = rng.random_range(0..3);
+            let removed = match strategy {
+                0 => {
+                    let count = (next.len() as f64 * rng.random_range(0.05..0.20)) as usize;
+                    let mut pool = HashSet::new();
+                    for _ in 0..count.max(1) { if !next.is_empty() { pool.extend(next.swap_remove(rng.random_range(0..next.len()))); } }
+                    pool
+                }
+                1 => {
+                    next.sort_by_key(|s| s.len());
+                    let mut pool = HashSet::new();
+                    for _ in 0..(next.len() / 4).max(1) { if !next.is_empty() { pool.extend(next.remove(0)); } }
+                    pool
+                }
+                _ => {
+                    next.sort_by_key(|s| std::cmp::Reverse(s.len()));
+                    let mut pool = HashSet::new();
+                    for _ in 0..(rng.random_range(1..=2)).min(next.len()) {
+                        if !next.is_empty() { pool.extend(next.remove(0)); }
+                    }
+                    pool
+                }
             };
-
             if !removed.is_empty() {
                 let mut pool_vec: Vec<u32> = removed.iter().cloned().collect();
                 pool_vec.shuffle(&mut rng);
