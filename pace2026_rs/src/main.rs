@@ -111,11 +111,15 @@ fn solve_maf_alns_sa_final(t1: &Arc<Tree>, t2: &Arc<Tree>, initial: Vec<HashSet<
     let best_partition_shared = Arc::new(Mutex::new(initial.clone()));
     let best_count_shared = Arc::new(Mutex::new(initial.len()));
 
-    (0..rayon::current_num_threads()).into_par_iter().for_each(|_| {
+    (0..rayon::current_num_threads()).into_par_iter().for_each(|thread_id| {
         let mut rng = rand::rng();
         let mut current = initial.clone();
         let mut current_count = current.len();
-        let mut temp = 1.0;
+        
+        // DIVERSIFICATION
+        let t_mult = 5.0 + (thread_id as f64 * 5.0);
+        let destroy_base = 0.02 + (thread_id as f64 * 0.01);
+        let destroy_max = destroy_base + 0.15;
 
         while Instant::now() < deadline {
             let mut next = current.clone();
@@ -124,7 +128,7 @@ fn solve_maf_alns_sa_final(t1: &Arc<Tree>, t2: &Arc<Tree>, initial: Vec<HashSet<
             let strategy = rng.random_range(0..3);
             let removed = match strategy {
                 0 => {
-                    let count = (next.len() as f64 * rng.random_range(0.05..0.20)) as usize;
+                    let count = (next.len() as f64 * rng.random_range(destroy_base..destroy_max)) as usize;
                     let mut pool = HashSet::new();
                     for _ in 0..count.max(1) { if !next.is_empty() { pool.extend(next.swap_remove(rng.random_range(0..next.len()))); } }
                     pool
@@ -163,7 +167,6 @@ fn solve_maf_alns_sa_final(t1: &Arc<Tree>, t2: &Arc<Tree>, initial: Vec<HashSet<
                             pool_vec.swap_remove(i); 
                         } else { 
                             comp.remove(&pool_vec[i]); 
-                            // Rebuild mask (simplified since we only removed one)
                             subset_mask = FastBitSet::new(n_leaves * 3);
                             for &l in &comp { subset_mask.set(l); }
                             i += 1; 
@@ -191,20 +194,24 @@ fn solve_maf_alns_sa_final(t1: &Arc<Tree>, t2: &Arc<Tree>, initial: Vec<HashSet<
 
             let next_count = next.len();
             let delta = next_count as f64 - current_count as f64;
-            if delta < 0.0 || rng.random_bool((-delta / temp).exp().min(1.0)) {
+            
+            let elapsed = start_time.elapsed().as_secs_f64();
+            let progress = elapsed / limit_seconds as f64;
+            let dynamic_temp = 1.0 * (1.0 - progress).max(0.001);
+            
+            if delta <= 0.0 || rng.random_bool((-delta / (dynamic_temp * t_mult)).exp().clamp(0.0, 1.0)) {
                 current = next; current_count = next_count;
                 let mut bc = best_count_shared.lock().unwrap();
                 if current_count < *bc {
                     *bc = current_count;
                     *best_partition_shared.lock().unwrap() = current.clone();
-                    eprintln!("New best (ALNS): {}", *bc);
+                    eprintln!("New best (ALNS-SA): {}", *bc);
                 }
             }
-            temp *= 0.9997;
-            if rng.random_bool(0.005) {
+            
+            if rng.random_bool(0.01) {
                 current = best_partition_shared.lock().unwrap().clone();
                 current_count = current.len();
-                temp = 1.0;
             }
         }
     });
