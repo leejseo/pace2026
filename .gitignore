@@ -28,9 +28,6 @@ compare_times.py
 benchmark.py
 ITERATION_LOG.md
 
-# Local Documentation
-docs/
-
 # OS generated files
 .DS_Store
 .DS_Store?
