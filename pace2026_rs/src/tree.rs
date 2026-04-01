@@ -64,8 +64,6 @@ pub enum Tree {
 impl Tree {
     pub fn mask(&self) -> &Arc<FastBitSet> { match self { Tree::Leaf(_, m) | Tree::Node(_, _, m, _) => m } }
     pub fn size(&self) -> usize { match self { Tree::Leaf(_, _) => 1, Tree::Node(_, _, _, s) => *s } }
-    pub fn is_leaf(&self) -> bool { matches!(self, Tree::Leaf(_, _)) }
-    pub fn leaf_id(&self) -> u32 { match self { Tree::Leaf(id, _) => *id, _ => 0 } }
 }
 
 pub fn original_to_tree(node: &OriginalNode, n_leaves: u32) -> Arc<Tree> {
@@ -105,96 +103,6 @@ pub fn get_hash_map(tree: &Arc<Tree>, map: &mut HashMap<u64, Arc<Tree>>) -> u64 
     }
 }
 
-pub fn tree_to_expansion(tree: &Arc<Tree>) -> Expansion {
-    match tree.as_ref() {
-        Tree::Leaf(id, _) => Expansion::Leaf(*id),
-        Tree::Node(l, r, _, _) => Expansion::new_node(tree_to_expansion(l), tree_to_expansion(r)),
-    }
-}
-
-pub fn cut_leaf_fixed(tree: &Arc<Tree>, leaf_id: u32) -> Option<Arc<Tree>> {
-    match tree.as_ref() {
-        Tree::Leaf(id, _) => if *id == leaf_id { None } else { Some(tree.clone()) },
-        Tree::Node(l, r, _, _) => {
-            let nl = cut_leaf_fixed(l, leaf_id);
-            let nr = cut_leaf_fixed(r, leaf_id);
-            match (nl, nr) {
-                (None, None) => None,
-                (Some(t), None) | (None, Some(t)) => Some(t),
-                (Some(tl), Some(tr)) => {
-                    if Arc::ptr_eq(&tl, l) && Arc::ptr_eq(&tr, r) { return Some(tree.clone()); }
-                    let m = tl.mask().or(tr.mask());
-                    let sz = tl.size() + tr.size();
-                    Some(Arc::new(Tree::Node(tl, tr, Arc::new(m), sz)))
-                }
-            }
-        }
-    }
-}
-
-pub fn contract_cherry_internal(tree: &Arc<Tree>, a: u32, b: u32, new_id: u32, n_leaves: u32) -> Arc<Tree> {
-    match tree.as_ref() {
-        Tree::Leaf(id, _) => if *id == a || *id == b { 
-            let mut m = FastBitSet::new(n_leaves*3); m.set(new_id);
-            Arc::new(Tree::Leaf(new_id, Arc::new(m)))
-        } else { tree.clone() },
-        Tree::Node(l, r, _, _) => {
-            if l.is_leaf() && r.is_leaf() {
-                let (id_l, id_r) = (l.leaf_id(), r.leaf_id());
-                if (id_l == a && id_r == b) || (id_l == b && id_r == a) {
-                    let mut m = FastBitSet::new(n_leaves*3); m.set(new_id);
-                    return Arc::new(Tree::Leaf(new_id, Arc::new(m)));
-                }
-            }
-            let nl = contract_cherry_internal(l, a, b, new_id, n_leaves);
-            let nr = contract_cherry_internal(r, a, b, new_id, n_leaves);
-            if Arc::ptr_eq(&nl, l) && Arc::ptr_eq(&nr, r) { return tree.clone(); }
-            let m = nl.mask().or(nr.mask());
-            let sz = nl.size() + nr.size();
-            Arc::new(Tree::Node(nl, nr, Arc::new(m), sz))
-        }
-    }
-}
-
-pub fn path_to_leaf(tree: &Arc<Tree>, target_leaf: u32) -> Vec<(Arc<Tree>, usize)> {
-    let mut path = Vec::new();
-    let mut curr = tree.clone();
-    while let Tree::Node(l, r, _, _) = curr.as_ref() {
-        if l.mask().get(target_leaf) {
-            path.push((curr.clone(), 0)); curr = l.clone();
-        } else if r.mask().get(target_leaf) {
-            path.push((curr.clone(), 1)); curr = r.clone();
-        } else { break; }
-    }
-    path
-}
-
-pub fn offpath_candidates(tree: &Arc<Tree>, a: u32, b: u32) -> Vec<Arc<Tree>> {
-    let path_a = path_to_leaf(tree, a);
-    let path_b = path_to_leaf(tree, b);
-    if path_a.is_empty() || path_b.is_empty() { return Vec::new(); }
-    let mut lca_idx = 0;
-    while lca_idx + 1 < path_a.len() && lca_idx + 1 < path_b.len() && Arc::ptr_eq(&path_a[lca_idx + 1].0, &path_b[lca_idx + 1].0) {
-        lca_idx += 1;
-    }
-    let mut candidates = Vec::new();
-    for i in lca_idx..path_a.len() {
-        if let Tree::Node(l, r, _, _) = path_a[i].0.as_ref() {
-            let side = path_a[i].1;
-            let off = if side == 0 { r.clone() } else { l.clone() };
-            if !off.mask().get(b) { candidates.push(off); }
-        }
-    }
-    for i in lca_idx..path_b.len() {
-        if let Tree::Node(l, r, _, _) = path_b[i].0.as_ref() {
-            let side = path_b[i].1;
-            let off = if side == 0 { r.clone() } else { l.clone() };
-            if !off.mask().get(a) { candidates.push(off); }
-        }
-    }
-    candidates
-}
-
 pub fn get_all_leaves(tree: &Arc<Tree>) -> Vec<u32> {
     let mut leaves = Vec::new();
     let mut stack = vec![tree.clone()];
@@ -207,20 +115,35 @@ pub fn get_all_leaves(tree: &Arc<Tree>) -> Vec<u32> {
     leaves
 }
 
-pub fn replace_subtree_fast(tree: &Arc<Tree>, target_hash: u64, new_id: u32, n_leaves: u32) -> Arc<Tree> {
-    if tree_to_expansion(tree).hash_val() == target_hash {
-        let mut m = FastBitSet::new(n_leaves * 3); m.set(new_id);
-        return Arc::new(Tree::Leaf(new_id, Arc::new(m)));
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn leaf(id: u32, n: u32) -> Arc<Tree> {
+        let mut m = FastBitSet::new(n * 3); m.set(id);
+        Arc::new(Tree::Leaf(id, Arc::new(m)))
     }
-    match tree.as_ref() {
-        Tree::Leaf(_, _) => tree.clone(),
-        Tree::Node(l, r, _, _) => {
-            let nl = replace_subtree_fast(l, target_hash, new_id, n_leaves);
-            let nr = replace_subtree_fast(r, target_hash, new_id, n_leaves);
-            if Arc::ptr_eq(&nl, l) && Arc::ptr_eq(&nr, r) { return tree.clone(); }
-            let m = nl.mask().or(nr.mask());
-            let sz = nl.size() + nr.size();
-            Arc::new(Tree::Node(nl, nr, Arc::new(m), sz))
-        }
+
+    fn node(l: Arc<Tree>, r: Arc<Tree>) -> Arc<Tree> {
+        let m = l.mask().or(r.mask());
+        let s = l.size() + r.size();
+        Arc::new(Tree::Node(l, r, Arc::new(m), s))
+    }
+
+    #[test]
+    fn test_mask_integrity() {
+        let l1 = leaf(1, 10);
+        let l2 = leaf(2, 10);
+        let n1 = node(l1, l2);
+        assert!(n1.mask().get(1));
+        assert!(n1.mask().get(2));
+        assert!(!n1.mask().get(3));
+    }
+
+    #[test]
+    fn test_deterministic_hashing() {
+        let e1 = Expansion::new_node(Expansion::Leaf(1), Expansion::Leaf(2));
+        let e2 = Expansion::new_node(Expansion::Leaf(2), Expansion::Leaf(1));
+        assert_eq!(e1.hash_val(), e2.hash_val());
     }
 }

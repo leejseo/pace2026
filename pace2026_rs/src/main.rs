@@ -3,7 +3,7 @@ mod state;
 mod io;
 
 use std::collections::{HashSet, HashMap};
-use crate::tree::{OriginalNode, original_to_tree, Tree, get_all_leaves, Expansion, get_hash_map};
+use crate::tree::{OriginalNode, original_to_tree, get_hash_map, Expansion};
 use crate::io::{parse_instance_file, render_expansion};
 use anyhow::Result;
 use std::time::{Instant, Duration};
@@ -35,8 +35,7 @@ fn run(time_limit: u64) -> Result<()> {
     let mut labels = HashSet::new(); get_labels(&instance.tree1, &mut labels);
     let n_leaves = labels.len() as u32;
     
-    let initial_clusters = get_mcsr_clusters_safe(&instance.tree1, &instance.tree2, n_leaves, &labels);
-    let partition = solve_maf_alns_sa_final(&instance.tree1, &instance.tree2, initial_clusters, time_limit);
+    let partition = solve_maf_alns_sa_final(&instance.tree1, &instance.tree2, get_initial_partition(&instance.tree1, &instance.tree2, n_leaves, &labels), time_limit);
     
     let out = stdout();
     let mut writer = BufWriter::new(out.lock());
@@ -69,7 +68,7 @@ fn build_induced_expansion(node: &OriginalNode, leaves: &HashSet<u32>) -> Option
     }
 }
 
-fn get_mcsr_clusters_safe(orig1: &OriginalNode, orig2: &OriginalNode, n_leaves: u32, all_labels: &HashSet<u32>) -> Vec<HashSet<u32>> {
+fn get_initial_partition(orig1: &OriginalNode, orig2: &OriginalNode, n_leaves: u32, all_labels: &HashSet<u32>) -> Vec<HashSet<u32>> {
     let t1 = original_to_tree(orig1, n_leaves);
     let t2 = original_to_tree(orig2, n_leaves);
     let mut sub1 = HashMap::new(); get_hash_map(&t1, &mut sub1);
@@ -77,7 +76,7 @@ fn get_mcsr_clusters_safe(orig1: &OriginalNode, orig2: &OriginalNode, n_leaves: 
     let mut common = Vec::new();
     for (hash, node1) in sub1 {
         if sub2.contains_key(&hash) {
-            let leaves = get_all_leaves(&node1);
+            let leaves = crate::tree::get_all_leaves(&node1);
             if leaves.len() > 1 {
                 let s: HashSet<u32> = leaves.into_iter().collect();
                 if is_truly_isomorphic(orig1, orig2, &s) { common.push(s); }
@@ -111,8 +110,6 @@ fn solve_maf_alns_sa_final(orig1: &OriginalNode, orig2: &OriginalNode, initial: 
 
         while Instant::now() < deadline {
             let mut next = current.clone();
-            
-            // ADAPTIVE DESTROY
             let removed = if rng.random_bool(0.5) {
                 let count = (next.len() as f64 * rng.random_range(0.05..0.20)) as usize;
                 let mut pool = HashSet::new();
@@ -125,7 +122,6 @@ fn solve_maf_alns_sa_final(orig1: &OriginalNode, orig2: &OriginalNode, initial: 
                 pool
             };
 
-            // REPAIR: Greedily expand up to a size limit
             if !removed.is_empty() {
                 let mut pool_vec: Vec<u32> = removed.iter().cloned().collect();
                 pool_vec.shuffle(&mut rng);
@@ -142,7 +138,6 @@ fn solve_maf_alns_sa_final(orig1: &OriginalNode, orig2: &OriginalNode, initial: 
                 }
             }
 
-            // LOCAL MERGE
             for _ in 0..100 {
                 if next.len() <= 1 { break; }
                 let i = rng.random_range(0..next.len());
@@ -183,5 +178,45 @@ fn is_truly_isomorphic(t1: &OriginalNode, t2: &OriginalNode, leaves: &HashSet<u3
     match (exp1, exp2) {
         (Some(e1), Some(e2)) => render_expansion(&e1) == render_expansion(&e2),
         _ => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn leaf(id: u32) -> Box<OriginalNode> {
+        Box::new(OriginalNode { left: None, right: None, label: Some(id) })
+    }
+
+    fn node(l: Box<OriginalNode>, r: Box<OriginalNode>) -> Box<OriginalNode> {
+        Box::new(OriginalNode { left: Some(l), right: Some(r), label: None })
+    }
+
+    #[test]
+    fn test_is_truly_isomorphic_simple() {
+        let t1 = node(leaf(1), node(leaf(2), leaf(3))); // (1, (2, 3))
+        let t2 = node(node(leaf(1), leaf(2)), leaf(3)); // ((1, 2), 3)
+        
+        let mut s = HashSet::new(); s.insert(2); s.insert(3);
+        assert!(is_truly_isomorphic(&t1, &t2, &s));
+        
+        let mut s = HashSet::new(); s.insert(1); s.insert(2); s.insert(3);
+        assert!(!is_truly_isomorphic(&t1, &t2, &s));
+    }
+
+    #[test]
+    fn test_build_induced_expansion_suppression() {
+        let t1 = node(leaf(1), node(leaf(2), leaf(3))); // (1, (2, 3))
+        let mut s = HashSet::new(); s.insert(1); s.insert(3);
+        let exp = build_induced_expansion(&t1, &s).unwrap();
+        
+        if let Expansion::Node(l, r, _) = exp {
+            let mut ids = vec![l.hash_val(), r.hash_val()];
+            ids.sort();
+            assert_eq!(ids, vec![1, 3]);
+        } else {
+            panic!("Expected node expansion");
+        }
     }
 }
