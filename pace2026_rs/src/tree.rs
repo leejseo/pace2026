@@ -8,7 +8,7 @@ pub struct FastBitSet {
 
 impl FastBitSet {
     pub fn new(n_leaves: u32) -> Self {
-        let size = ((n_leaves + 63) / 64) as usize;
+        let size = ((n_leaves + 64) / 64) as usize;
         Self { words: vec![0; size] }
     }
     pub fn set(&mut self, bit: u32) {
@@ -18,6 +18,12 @@ impl FastBitSet {
     pub fn get(&self, bit: u32) -> bool {
         let idx = (bit / 64) as usize;
         if idx < self.words.len() { (self.words[idx] & (1 << (bit % 64))) != 0 } else { false }
+    }
+    pub fn intersects(&self, other: &Self) -> bool {
+        for i in 0..self.words.len().min(other.words.len()) {
+            if (self.words[i] & other.words[i]) != 0 { return true; }
+        }
+        false
     }
     pub fn or(&self, other: &Self) -> Self {
         let mut res = self.words.clone();
@@ -33,23 +39,37 @@ pub struct OriginalNode {
     pub label: Option<u32>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Hash)]
+#[derive(Clone, Debug, Eq, Hash)]
 pub enum Expansion {
     Leaf(u32),
     Node(Arc<Expansion>, Arc<Expansion>, u64),
 }
 
+impl PartialEq for Expansion {
+    fn eq(&self, other: &Self) -> bool {
+        if self.hash_val() != other.hash_val() { return false; }
+        match (self, other) {
+            (Expansion::Leaf(a), Expansion::Leaf(b)) => a == b,
+            (Expansion::Node(l1, r1, _), Expansion::Node(l2, r2, _)) => l1 == l2 && r1 == r2,
+            _ => false,
+        }
+    }
+}
+
 impl Expansion {
     pub fn hash_val(&self) -> u64 {
-        match self { Expansion::Leaf(id) => *id as u64, Expansion::Node(_, _, h) => *h }
+        match self { 
+            Expansion::Leaf(id) => (*id as u64).wrapping_mul(0x9E3779B97F4A7C15), 
+            Expansion::Node(_, _, h) => *h 
+        }
     }
     pub fn new_node(l: Expansion, r: Expansion) -> Self {
         let h1 = l.hash_val();
         let h2 = r.hash_val();
         let (min_h, max_h) = if h1 < h2 { (h1, h2) } else { (h2, h1) };
         let hfinal = min_h.wrapping_mul(6364136223846793005)
-            .wrapping_add(max_h)
-            .wrapping_add(1442695040888963407);
+            .wrapping_add(max_h.wrapping_mul(1442695040888963407))
+            .wrapping_add(0x1234567890ABCDEF);
         if h1 < h2 { Expansion::Node(Arc::new(l), Arc::new(r), hfinal) }
         else { Expansion::Node(Arc::new(r), Arc::new(l), hfinal) }
     }
@@ -86,7 +106,7 @@ pub fn original_to_tree(node: &OriginalNode, n_leaves: u32) -> Arc<Tree> {
 pub fn get_hash_map(tree: &Arc<Tree>, map: &mut HashMap<u64, Arc<Tree>>) -> u64 {
     match tree.as_ref() {
         Tree::Leaf(id, _) => {
-            let h = *id as u64;
+            let h = (*id as u64).wrapping_mul(0x9E3779B97F4A7C15);
             map.insert(h, tree.clone());
             h
         },
@@ -95,8 +115,8 @@ pub fn get_hash_map(tree: &Arc<Tree>, map: &mut HashMap<u64, Arc<Tree>>) -> u64 
             let h2 = get_hash_map(r, map);
             let (min_h, max_h) = if h1 < h2 { (h1, h2) } else { (h2, h1) };
             let hfinal = min_h.wrapping_mul(6364136223846793005)
-                .wrapping_add(max_h)
-                .wrapping_add(1442695040888963407);
+                .wrapping_add(max_h.wrapping_mul(1442695040888963407))
+                .wrapping_add(0x1234567890ABCDEF);
             map.insert(hfinal, tree.clone());
             hfinal
         }
