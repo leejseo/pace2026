@@ -1,10 +1,12 @@
 mod tree;
 mod state;
 mod io;
+mod kernel;
 
 use std::collections::{HashSet, HashMap};
 use crate::tree::{OriginalNode, original_to_tree, Tree, get_all_leaves, Expansion, get_hash_map, FastBitSet};
 use crate::io::{parse_instance_file, render_expansion};
+use crate::kernel::exact_subtree_kernelization;
 use anyhow::Result;
 use std::time::{Instant, Duration};
 use rayon::prelude::*;
@@ -34,7 +36,7 @@ fn run(time_limit: u64) -> Result<()> {
     let instance = parse_instance_file(&args[1])?;
     let mut labels = HashSet::new(); get_labels(&instance.tree1, &mut labels);
     let n_leaves = labels.len() as u32;
-    
+
     let t1 = original_to_tree(&instance.tree1, n_leaves);
     let t2 = original_to_tree(&instance.tree2, n_leaves);
 
@@ -55,6 +57,7 @@ fn run(time_limit: u64) -> Result<()> {
     for leaf_set in partition {
         let mut subset_mask = FastBitSet::new(n_leaves * 3);
         for &l in &leaf_set { subset_mask.set(l); }
+        
         if let Some(exp) = build_induced_expansion_fast(&t1, &leaf_set, &subset_mask) {
             writer.write_all(render_expansion(&exp).as_bytes())?;
             writer.write_all(b";\n")?;
@@ -209,8 +212,42 @@ fn solve_maf_alns_sa_final(t1: &Arc<Tree>, t2: &Arc<Tree>, initial: Vec<HashSet<
                 }
             }
 
+            // SHIFT OPERATOR (Iteration 13)
+            if rng.random_bool(0.2) && next.len() > 1 {
+                for _ in 0..50 {
+                    let from_idx = rng.random_range(0..next.len());
+                    if next[from_idx].len() <= 1 { continue; }
+                    let to_idx = rng.random_range(0..next.len());
+                    if from_idx == to_idx { continue; }
+                    
+                    // Pick a random leaf from 'from'
+                    let leaves: Vec<u32> = next[from_idx].iter().cloned().collect();
+                    let leaf_to_move = *leaves.choose(&mut rng).unwrap();
+                    
+                    // Try to move it to 'to'
+                    let mut new_to = next[to_idx].clone();
+                    new_to.insert(leaf_to_move);
+                    
+                    let mut subset_mask_to = FastBitSet::new(n_leaves * 3);
+                    for &l in &new_to { subset_mask_to.set(l); }
+                    
+                    if is_truly_isomorphic_fast(t1, t2, &new_to, &subset_mask_to) {
+                        // Check if the remainder of 'from' is still valid!
+                        let mut new_from = next[from_idx].clone();
+                        new_from.remove(&leaf_to_move);
+                        let mut subset_mask_from = FastBitSet::new(n_leaves * 3);
+                        for &l in &new_from { subset_mask_from.set(l); }
+                        
+                        if is_truly_isomorphic_fast(t1, t2, &new_from, &subset_mask_from) {
+                            next[to_idx] = new_to;
+                            next[from_idx] = new_from;
+                        }
+                    }
+                }
+            }
+
             // LOCAL MERGE
-            if dynamic_temp < 0.05 {
+            if next.len() < 500 || progress > 0.9 {
                 // Iteration 8: Exhaustive Pairwise Merging at Low Temperatures
                 let mut changed = true;
                 while changed && Instant::now() < deadline {
@@ -237,7 +274,7 @@ fn solve_maf_alns_sa_final(t1: &Arc<Tree>, t2: &Arc<Tree>, initial: Vec<HashSet<
                     }
                 }
             } else {
-                for _ in 0..100 {
+                for _ in 0..2000 {
                     if next.len() <= 1 { break; }
                     let i = rng.random_range(0..next.len());
                     let j = (i + rng.random_range(1..next.len())) % next.len();

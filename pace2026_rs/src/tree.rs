@@ -71,7 +71,7 @@ pub struct OriginalNode {
 #[derive(Clone, Debug, Eq, Hash)]
 pub enum Expansion {
     Leaf(u32),
-    Node(Arc<Expansion>, Arc<Expansion>, u64),
+    Node(Arc<Expansion>, Arc<Expansion>, u128),
 }
 
 impl PartialEq for Expansion {
@@ -86,9 +86,9 @@ impl PartialEq for Expansion {
 }
 
 impl Expansion {
-    pub fn hash_val(&self) -> u64 {
+    pub fn hash_val(&self) -> u128 {
         match self { 
-            Expansion::Leaf(id) => (*id as u64).wrapping_mul(0x9E3779B97F4A7C15), 
+            Expansion::Leaf(id) => (*id as u128).wrapping_mul(0x9E3779B97F4A7C15_u128) ^ 0x1234567890ABCDEF_u128, 
             Expansion::Node(_, _, h) => *h 
         }
     }
@@ -96,9 +96,9 @@ impl Expansion {
         let h1 = l.hash_val();
         let h2 = r.hash_val();
         let (min_h, max_h) = if h1 < h2 { (h1, h2) } else { (h2, h1) };
-        let hfinal = min_h.wrapping_mul(6364136223846793005)
-            .wrapping_add(max_h.wrapping_mul(1442695040888963407))
-            .wrapping_add(0x1234567890ABCDEF);
+        let hfinal = min_h.wrapping_mul(0x5bd1e995_5bd1e995_u128)
+            .wrapping_add(max_h.wrapping_mul(0x27d4eb2f_27d4eb2f_u128))
+            .wrapping_add(0x85ebca6b_85ebca6b_u128);
         if h1 < h2 { Expansion::Node(Arc::new(l), Arc::new(r), hfinal) }
         else { Expansion::Node(Arc::new(r), Arc::new(l), hfinal) }
     }
