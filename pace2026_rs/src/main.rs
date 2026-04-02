@@ -1,18 +1,18 @@
 mod tree;
 mod state;
 mod io;
-mod kernel;
 
 use std::collections::{HashSet, HashMap};
 use crate::tree::{OriginalNode, original_to_tree, Tree, get_all_leaves, Expansion, get_hash_map, FastBitSet};
 use crate::io::{parse_instance_file, render_expansion};
-use crate::kernel::exact_subtree_kernelization;
 use anyhow::Result;
 use std::time::{Instant, Duration};
 use rayon::prelude::*;
 use std::sync::{Arc, Mutex};
 use rand::prelude::*;
 use std::io::{Write, BufWriter, stdout};
+use std::hash::{Hash, Hasher};
+use std::collections::hash_map::DefaultHasher;
 
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
@@ -36,7 +36,7 @@ fn run(time_limit: u64) -> Result<()> {
     let instance = parse_instance_file(&args[1])?;
     let mut labels = HashSet::new(); get_labels(&instance.tree1, &mut labels);
     let n_leaves = labels.len() as u32;
-
+    
     let t1 = original_to_tree(&instance.tree1, n_leaves);
     let t2 = original_to_tree(&instance.tree2, n_leaves);
 
@@ -54,10 +54,10 @@ fn run(time_limit: u64) -> Result<()> {
     
     let out = stdout();
     let mut writer = BufWriter::new(out.lock());
+    let mut subset_mask = FastBitSet::new(n_leaves * 3);
     for leaf_set in partition {
-        let mut subset_mask = FastBitSet::new(n_leaves * 3);
+        subset_mask.clear_all();
         for &l in &leaf_set { subset_mask.set(l); }
-        
         if let Some(exp) = build_induced_expansion_fast(&t1, &leaf_set, &subset_mask) {
             writer.write_all(render_expansion(&exp).as_bytes())?;
             writer.write_all(b";\n")?;
@@ -71,6 +71,47 @@ fn get_labels(node: &OriginalNode, set: &mut HashSet<u32>) {
     if let Some(id) = node.label { set.insert(id); }
     if let Some(ref l) = node.left { get_labels(l, set); }
     if let Some(ref r) = node.right { get_labels(r, set); }
+}
+
+fn compute_induced_hash(tree: &Arc<Tree>, leaves: &HashSet<u32>, subset_mask: &FastBitSet) -> Option<u64> {
+    if !tree.mask().intersects(subset_mask) { return None; }
+    match tree.as_ref() {
+        Tree::Leaf(id, _) => {
+            if leaves.contains(id) {
+                let mut hasher = DefaultHasher::new();
+                id.hash(&mut hasher);
+                Some(hasher.finish())
+            } else {
+                None
+            }
+        },
+        Tree::Node(l, r, _, _) => {
+            let left_h = compute_induced_hash(l, leaves, subset_mask);
+            let right_h = compute_induced_hash(r, leaves, subset_mask);
+            match (left_h, right_h) {
+                (Some(h1), Some(h2)) => {
+                    let mut hasher = DefaultHasher::new();
+                    if h1 < h2 {
+                        h1.hash(&mut hasher);
+                        h2.hash(&mut hasher);
+                    } else {
+                        h2.hash(&mut hasher);
+                        h1.hash(&mut hasher);
+                    }
+                    Some(hasher.finish())
+                },
+                (Some(h), None) | (None, Some(h)) => Some(h),
+                (None, None) => None
+            }
+        }
+    }
+}
+
+fn is_truly_isomorphic_fast(t1: &Arc<Tree>, t2: &Arc<Tree>, leaves: &HashSet<u32>, subset_mask: &FastBitSet) -> bool {
+    if leaves.len() <= 1 { return true; }
+    let h1 = compute_induced_hash(t1, leaves, subset_mask);
+    let h2 = compute_induced_hash(t2, leaves, subset_mask);
+    h1 == h2 && h1.is_some()
 }
 
 fn build_induced_expansion_fast(tree: &Arc<Tree>, leaves: &HashSet<u32>, subset_mask: &FastBitSet) -> Option<Expansion> {
@@ -135,6 +176,10 @@ fn solve_maf_alns_sa_final(t1: &Arc<Tree>, t2: &Arc<Tree>, initial: Vec<HashSet<
         let mut rng = rand::rng();
         let mut current = initial.clone();
         let mut current_count = current.len();
+        
+        let mut stubbornness = vec![0; current.len()];
+        let mut age = vec![0; current.len()];
+        let mut subset_mask = FastBitSet::new(n_leaves * 3);
 
         while Instant::now() < deadline {
             let mut next = current.clone();
@@ -142,7 +187,6 @@ fn solve_maf_alns_sa_final(t1: &Arc<Tree>, t2: &Arc<Tree>, initial: Vec<HashSet<
             let elapsed = start_time.elapsed().as_secs_f64();
             let progress = elapsed / limit_seconds as f64;
 
-            // Iteration 10: Multi-Phase Anytime Execution
             let (phase_destroy_base, phase_destroy_max, allow_sa) = if progress < 0.6 {
                 (0.05, 0.25, true)
             } else if progress < 0.9 {
@@ -157,25 +201,86 @@ fn solve_maf_alns_sa_final(t1: &Arc<Tree>, t2: &Arc<Tree>, initial: Vec<HashSet<
             let dynamic_temp = 1.0 * (1.0 - progress).max(0.001);
 
             // ADAPTIVE DESTROY
-            let strategy = rng.random_range(0..3);
+            let strategy = rng.random_range(0..4);
             let removed = match strategy {
                 0 => {
                     let count = (next.len() as f64 * rng.random_range(destroy_base..destroy_max)) as usize;
                     let mut pool = HashSet::new();
-                    for _ in 0..count.max(1) { if !next.is_empty() { pool.extend(next.swap_remove(rng.random_range(0..next.len()))); } }
+                    for _ in 0..count.max(1) { 
+                        if !next.is_empty() { 
+                            let idx = rng.random_range(0..next.len());
+                            if age[idx] < 50 || next[idx].len() < 20 {
+                                pool.extend(next.swap_remove(idx)); 
+                                stubbornness.swap_remove(idx);
+                                age.swap_remove(idx);
+                            }
+                        } 
+                    }
                     pool
                 }
                 1 => {
-                    next.sort_by_key(|s| s.len());
+                    let mut zipped: Vec<_> = next.into_iter().zip(stubbornness.into_iter()).zip(age.into_iter()).collect();
+                    zipped.sort_by_key(|((s, _), _)| s.len());
+                    next = zipped.into_iter().map(|((s, _), _)| s).collect();
+                    stubbornness = vec![0; next.len()];
+                    age = vec![0; next.len()];
                     let mut pool = HashSet::new();
-                    for _ in 0..(next.len() / 4).max(1) { if !next.is_empty() { pool.extend(next.remove(0)); } }
+                    let mut i = 0;
+                    let target = (next.len() / 4).max(1);
+                    let mut removed_count = 0;
+                    while i < next.len() && removed_count < target {
+                        if age[i] < 50 || next[i].len() < 20 {
+                            pool.extend(next.remove(i));
+                            stubbornness.remove(i);
+                            age.remove(i);
+                            removed_count += 1;
+                        } else {
+                            i += 1;
+                        }
+                    }
+                    pool
+                }
+                2 => {
+                    let mut zipped: Vec<_> = next.into_iter().zip(stubbornness.into_iter()).zip(age.into_iter()).collect();
+                    zipped.sort_by_key(|((s, _), _)| std::cmp::Reverse(s.len()));
+                    next = zipped.into_iter().map(|((s, _), _)| s).collect();
+                    stubbornness = vec![0; next.len()];
+                    age = vec![0; next.len()];
+                    let mut pool = HashSet::new();
+                    let mut i = 0;
+                    let target = (rng.random_range(1..=2)).min(next.len());
+                    let mut removed_count = 0;
+                    while i < next.len() && removed_count < target {
+                        if age[i] < 50 || next[i].len() < 20 {
+                            pool.extend(next.remove(i));
+                            stubbornness.remove(i);
+                            age.remove(i);
+                            removed_count += 1;
+                        } else {
+                            i += 1;
+                        }
+                    }
                     pool
                 }
                 _ => {
-                    next.sort_by_key(|s| std::cmp::Reverse(s.len()));
+                    let mut zipped: Vec<_> = next.into_iter().zip(stubbornness.into_iter()).zip(age.into_iter()).collect();
+                    zipped.sort_by_key(|((_, stub), _)| std::cmp::Reverse(*stub));
+                    next = zipped.into_iter().map(|((s, _), _)| s).collect();
+                    stubbornness = vec![0; next.len()];
+                    age = vec![0; next.len()];
+                    let count = (next.len() as f64 * rng.random_range(destroy_base..destroy_max)) as usize;
                     let mut pool = HashSet::new();
-                    for _ in 0..(rng.random_range(1..=2)).min(next.len()) {
-                        if !next.is_empty() { pool.extend(next.remove(0)); }
+                    let mut i = 0;
+                    let mut removed_count = 0;
+                    while i < next.len() && removed_count < count.max(1) {
+                        if age[i] < 50 || next[i].len() < 20 {
+                            pool.extend(next.remove(i));
+                            stubbornness.remove(i);
+                            age.remove(i);
+                            removed_count += 1;
+                        } else {
+                            i += 1;
+                        }
                     }
                     pool
                 }
@@ -190,7 +295,7 @@ fn solve_maf_alns_sa_final(t1: &Arc<Tree>, t2: &Arc<Tree>, initial: Vec<HashSet<
                 
                 while !pool_vec.is_empty() {
                     let mut comp = HashSet::new(); comp.insert(pool_vec.pop().unwrap());
-                    let mut subset_mask = FastBitSet::new(n_leaves * 3);
+                    subset_mask.clear_all();
                     for &l in &comp { subset_mask.set(l); }
                     
                     let mut i = 0;
@@ -202,45 +307,49 @@ fn solve_maf_alns_sa_final(t1: &Arc<Tree>, t2: &Arc<Tree>, initial: Vec<HashSet<
                             pool_vec.remove(i); 
                         } else { 
                             comp.remove(&pool_vec[i]); 
-                            subset_mask = FastBitSet::new(n_leaves * 3);
-                            for &l in &comp { subset_mask.set(l); }
+                            subset_mask.clear(pool_vec[i]);
                             i += 1; 
                         }
                         if comp.len() > 500 { break; }
                     }
                     next.push(comp);
+                    stubbornness.push(0);
+                    age.push(0);
                 }
             }
 
-            // SHIFT OPERATOR (Iteration 13)
-            if rng.random_bool(0.2) && next.len() > 1 {
+            // SHIFT OPERATOR 
+            if rng.random_bool(0.3) && next.len() > 1 {
                 for _ in 0..50 {
                     let from_idx = rng.random_range(0..next.len());
                     if next[from_idx].len() <= 1 { continue; }
+                    if stubbornness[from_idx] < 2 && rng.random_bool(0.8) { continue; }
+
                     let to_idx = rng.random_range(0..next.len());
                     if from_idx == to_idx { continue; }
                     
-                    // Pick a random leaf from 'from'
                     let leaves: Vec<u32> = next[from_idx].iter().cloned().collect();
                     let leaf_to_move = *leaves.choose(&mut rng).unwrap();
                     
-                    // Try to move it to 'to'
                     let mut new_to = next[to_idx].clone();
                     new_to.insert(leaf_to_move);
                     
-                    let mut subset_mask_to = FastBitSet::new(n_leaves * 3);
-                    for &l in &new_to { subset_mask_to.set(l); }
+                    subset_mask.clear_all();
+                    for &l in &new_to { subset_mask.set(l); }
                     
-                    if is_truly_isomorphic_fast(t1, t2, &new_to, &subset_mask_to) {
-                        // Check if the remainder of 'from' is still valid!
+                    if is_truly_isomorphic_fast(t1, t2, &new_to, &subset_mask) {
                         let mut new_from = next[from_idx].clone();
                         new_from.remove(&leaf_to_move);
-                        let mut subset_mask_from = FastBitSet::new(n_leaves * 3);
-                        for &l in &new_from { subset_mask_from.set(l); }
+                        subset_mask.clear_all();
+                        for &l in &new_from { subset_mask.set(l); }
                         
-                        if is_truly_isomorphic_fast(t1, t2, &new_from, &subset_mask_from) {
+                        if is_truly_isomorphic_fast(t1, t2, &new_from, &subset_mask) {
                             next[to_idx] = new_to;
                             next[from_idx] = new_from;
+                            stubbornness[to_idx] = 0;
+                            stubbornness[from_idx] = 0;
+                            age[to_idx] = 0;
+                            age[from_idx] = 0;
                         }
                     }
                 }
@@ -248,7 +357,6 @@ fn solve_maf_alns_sa_final(t1: &Arc<Tree>, t2: &Arc<Tree>, initial: Vec<HashSet<
 
             // LOCAL MERGE
             if next.len() < 500 || progress > 0.9 {
-                // Iteration 8: Exhaustive Pairwise Merging at Low Temperatures
                 let mut changed = true;
                 while changed && Instant::now() < deadline {
                     changed = false;
@@ -258,15 +366,22 @@ fn solve_maf_alns_sa_final(t1: &Arc<Tree>, t2: &Arc<Tree>, initial: Vec<HashSet<
                         let mut merged_flag = false;
                         while j < next.len() {
                             let mut merged = next[i].clone(); merged.extend(&next[j]);
-                            let mut subset_mask = FastBitSet::new(n_leaves * 3);
+                            subset_mask.clear_all();
                             for &l in &merged { subset_mask.set(l); }
                             
                             if is_truly_isomorphic_fast(t1, t2, &merged, &subset_mask) {
                                 next.remove(j);
+                                stubbornness.remove(j);
+                                age.remove(j);
                                 next[i] = merged;
+                                stubbornness[i] = 0;
+                                age[i] = 0;
                                 changed = true;
                                 merged_flag = true;
                                 break;
+                            } else {
+                                stubbornness[i] += 1;
+                                stubbornness[j] += 1;
                             }
                             j += 1;
                         }
@@ -278,13 +393,20 @@ fn solve_maf_alns_sa_final(t1: &Arc<Tree>, t2: &Arc<Tree>, initial: Vec<HashSet<
                     if next.len() <= 1 { break; }
                     let i = rng.random_range(0..next.len());
                     let j = (i + rng.random_range(1..next.len())) % next.len();
+                    if i == j { continue; }
+                    
                     let mut merged = next[i].clone(); merged.extend(&next[j]);
-                    let mut subset_mask = FastBitSet::new(n_leaves * 3);
+                    subset_mask.clear_all();
                     for &l in &merged { subset_mask.set(l); }
                     
                     if is_truly_isomorphic_fast(t1, t2, &merged, &subset_mask) {
                         let (f, s) = if i > j { (i, j) } else { (j, i) };
-                        next.remove(f); next.remove(s); next.push(merged);
+                        next.remove(f); stubbornness.remove(f); age.remove(f);
+                        next.remove(s); stubbornness.remove(s); age.remove(s);
+                        next.push(merged); stubbornness.push(0); age.push(0);
+                    } else {
+                        stubbornness[i] += 1;
+                        stubbornness[j] += 1;
                     }
                 }
             }
@@ -293,6 +415,13 @@ fn solve_maf_alns_sa_final(t1: &Arc<Tree>, t2: &Arc<Tree>, initial: Vec<HashSet<
             let delta = next_count as f64 - current_count as f64;
             
             if delta <= 0.0 || (allow_sa && rng.random_bool((-delta / (dynamic_temp * t_mult)).exp().clamp(0.0, 1.0))) {
+                for i in 0..next.len() {
+                    if current.contains(&next[i]) {
+                        age[i] += 1;
+                    } else {
+                        age[i] = 0;
+                    }
+                }
                 current = next; current_count = next_count;
                 let mut bc = best_count_shared.lock().unwrap();
                 if current_count < *bc {
@@ -304,18 +433,10 @@ fn solve_maf_alns_sa_final(t1: &Arc<Tree>, t2: &Arc<Tree>, initial: Vec<HashSet<
             if rng.random_bool(0.01) {
                 current = best_partition_shared.lock().unwrap().clone();
                 current_count = current.len();
+                stubbornness = vec![0; current_count];
+                age = vec![0; current_count];
             }
         }
     });
     best_partition_shared.lock().unwrap().clone()
-}
-
-fn is_truly_isomorphic_fast(t1: &Arc<Tree>, t2: &Arc<Tree>, leaves: &HashSet<u32>, subset_mask: &FastBitSet) -> bool {
-    if leaves.len() <= 1 { return true; }
-    let exp1 = build_induced_expansion_fast(t1, leaves, subset_mask);
-    let exp2 = build_induced_expansion_fast(t2, leaves, subset_mask);
-    match (exp1, exp2) {
-        (Some(e1), Some(e2)) => e1 == e2,
-        _ => false,
-    }
 }

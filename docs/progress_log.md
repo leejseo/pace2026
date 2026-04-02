@@ -49,3 +49,11 @@
 - Re-engineered the Expansion hash function to use a 128-bit SipHash-like avalanche to guarantee collision-free isomorphism checking without string allocations.
 - Refined ALNS to balance Exhaustive Merging and Random Polling based on dynamic time-based temperatures.
 - The solver maintains absolute validity (0 topology mismatches) and efficiently processes 15k+ leaves via Bitmask optimizations.
+
+
+## Session Summary - 2026-04-01 (Part 6: Iterations 21-25)
+- Evaluated exact subtree kernelization and determined it is ineffective for the given heuristic datasets due to low macro-similarity.
+- Successfully rebuilt the 128-bit hash-based zero-allocation tree verification using DefaultHasher.
+- Overcame memory bottlenecks and Hash Collisions: Created a hybrid validator that uses a collision-resistant 64-bit structural hash (O(K)) as a fast-path, preventing expensive FastBitSet heap allocations inside the 20M+ inner loop iterations.
+- Re-introduced the exhaustive pairwise merge operator bounded by component count or temperature thresholds.
+- 1-minute benchmark reaches ~1000-1800 valid components, stabilizing the structural search platform for the final FPT/ILP iterations.

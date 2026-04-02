@@ -48,6 +48,9 @@ impl FastBitSet {
         let idx = (bit / 64) as usize;
         if idx < self.words.len() { self.words[idx] &= !(1 << (bit % 64)); }
     }
+    pub fn clear_all(&mut self) {
+        for w in &mut self.words { *w = 0; }
+    }
     pub fn intersects(&self, other: &Self) -> bool {
         for i in 0..self.words.len().min(other.words.len()) {
             if (self.words[i] & other.words[i]) != 0 { return true; }
