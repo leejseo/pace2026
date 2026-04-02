@@ -59,3 +59,23 @@
 ## Iteration 15: Cross-Thread Best Partition Seeding
 - **Task**: Allow threads to periodically adopt the *global* best partition rather than just their local best, simulating an evolutionary "migration" or swarm intelligence.
 - **Goal**: Converge all parallel computational power onto the most promising structural backbones.
+
+## Iteration 16: True Topological Subtree Kernelization
+- **Task**: Instead of just tracking common clusters, physically construct new reduced trees $T_1'$ and $T_2'$ where identical subtrees are collapsed into single "meta-leaves".
+- **Goal**: Shrink the size of the tree ($N$) from 15,000+ to under 300 leaves, exponentially reducing bitmask allocation sizes and recursion depths.
+
+## Iteration 17: Solve Kernel Tree MAF
+- **Task**: Run the ALNS-SA / FPT solver entirely on the reduced kernel tree ($T_1', T_2'$).
+- **Goal**: Solve the problem in the micro-space where the true rMAF distance $k$ dictates a tiny search boundary, reaching single-digit optimal components instantly.
+
+## Iteration 18: Map Kernel Solution to Original Leaves
+- **Task**: Take the resulting partition from the Kernel Tree and map the meta-leaves back to their original subsets of labels.
+- **Goal**: Expand the optimized kernel solution back to a fully valid solution on the original 15k trees.
+
+## Iteration 19: Strict Validation of Expanded Solution
+- **Task**: Verify the expanded components with the `is_truly_isomorphic_fast` logic against the original $T_1$ and $T_2$.
+- **Goal**: Ensure the kernel expansion did not introduce any subtle topology violations.
+
+## Iteration 20: Kernelization Pre-computation Pipeline
+- **Task**: Formalize Iterations 16-19 into a definitive pipeline that runs before any metaheuristic, defaulting to the original tree search only if kernelization fails to reduce $N$ significantly.
+- **Goal**: The ultimate, robust structure for the 2026 PACE rMAF challenge.
