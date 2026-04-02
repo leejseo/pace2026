@@ -111,7 +111,14 @@ fn is_truly_isomorphic_fast(t1: &Arc<Tree>, t2: &Arc<Tree>, leaves: &HashSet<u32
     if leaves.len() <= 1 { return true; }
     let h1 = compute_induced_hash(t1, leaves, subset_mask);
     let h2 = compute_induced_hash(t2, leaves, subset_mask);
-    h1 == h2 && h1.is_some()
+    if h1 != h2 || h1.is_none() { return false; }
+
+    let exp1 = build_induced_expansion_fast(t1, leaves, subset_mask);
+    let exp2 = build_induced_expansion_fast(t2, leaves, subset_mask);
+    match (exp1, exp2) {
+        (Some(e1), Some(e2)) => e1 == e2,
+        _ => false,
+    }
 }
 
 fn build_induced_expansion_fast(tree: &Arc<Tree>, leaves: &HashSet<u32>, subset_mask: &FastBitSet) -> Option<Expansion> {
@@ -286,7 +293,7 @@ fn solve_maf_alns_sa_final(t1: &Arc<Tree>, t2: &Arc<Tree>, initial: Vec<HashSet<
                 }
             };
 
-            // REPAIR: Discordance-biased expand
+            // REPAIR: Discordance-biased expand (O(M))
             if !removed.is_empty() {
                 let mut pool_vec: Vec<u32> = removed.iter().cloned().collect();
                 pool_vec.shuffle(&mut rng);

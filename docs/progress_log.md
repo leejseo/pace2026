@@ -57,3 +57,13 @@
 - Overcame memory bottlenecks and Hash Collisions: Created a hybrid validator that uses a collision-resistant 64-bit structural hash (O(K)) as a fast-path, preventing expensive FastBitSet heap allocations inside the 20M+ inner loop iterations.
 - Re-introduced the exhaustive pairwise merge operator bounded by component count or temperature thresholds.
 - 1-minute benchmark reaches ~1000-1800 valid components, stabilizing the structural search platform for the final FPT/ILP iterations.
+
+
+## Session Summary - 2026-04-01 (Part 7: Iterations 26-30)
+- Conducted extensive research on ILP and Conflict Graph representations for rMAF.
+- Iteration 26 & 27: Implemented Conflict-Driven Destroy operators by tracking the 'stubbornness' of individual components that fail to merge.
+- Iteration 28: Integrated Macro-Cluster Freezing by tracking the 'age' of components. Stable components that survive multiple iterations without conflict are frozen, restricting the destruction pool and acting as a dynamic kernelization.
+- Iteration 29: Refined the Greedy MIS (Maximum Independent Set) repair operator into an O(M) Discordance-Biased Builder.
+- Iteration 30: Final comprehensive 5-minute benchmarks yielded stable, highly optimized valid forests:
+  - heuristic26.nw (21k leaves): 390 components (Validated: True)
+  - heuristic28.nw (15k leaves): 419 components (Validated: True)
