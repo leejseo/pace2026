@@ -79,3 +79,43 @@
 ## Iteration 20: Kernelization Pre-computation Pipeline
 - **Task**: Formalize Iterations 16-19 into a definitive pipeline that runs before any metaheuristic, defaulting to the original tree search only if kernelization fails to reduce $N$ significantly.
 - **Goal**: The ultimate, robust structure for the 2026 PACE rMAF challenge.
+
+## Iteration 21: Conflict Graph Formulation (ILP/LP Prep)
+- **Task**: For a subset of discordant leaves or boundary clusters, construct a conflict graph where nodes are leaves and edges represent a topological contradiction between $T_1$ and $T_2$.
+- **Goal**: Translate the rMAF problem locally into a Maximum Weight Independent Set (MWIS) or Vertex Cover problem to prepare for exact/LP solving.
+
+## Iteration 22: Greedy Independent Set on Conflict Graph
+- **Task**: Implement a fast $O(V+E)$ greedy solver on the constructed conflict graph to find an initial large independent set (a valid agreement forest).
+- **Goal**: Serve as a highly optimized heuristic repair operator that outperforms random polling.
+
+## Iteration 23: LP Relaxation using External Solver
+- **Task**: Export the conflict graph to an LP format or interact with an external solver (like Gurobi or CBC) to solve the fractional relaxation of the MWIS.
+- **Goal**: Obtain a theoretical upper bound on the maximum agreement forest size for the local neighborhood.
+
+## Iteration 24: LP-Guided ALNS Construction
+- **Task**: Use the fractional LP variables (e.g., $x_i = 0.8$) as selection probabilities in the ALNS greedy builder instead of pure random shuffles.
+- **Goal**: Guide the stochastic search directly towards the mathematical global optimum.
+
+## Iteration 25: Sub-component Conflict Graph
+- **Task**: Instead of building a conflict graph of individual leaves, build it out of the $K \approx 200$ components currently found by the ALNS.
+- **Goal**: Identify pairs or triplets of components that are "almost" mergeable and target their specific conflicting leaves.
+
+## Iteration 26: Conflict Graph Generator
+- **Task**: Build a rudimentary Conflict Graph Generator for subsets of components to identify specific leaf-level conflicts.
+- **Goal**: Isolate and model the local constraints required to merge near-miss components.
+
+## Iteration 27: Greedy Maximum Independent Set (MIS) Repair
+- **Task**: Implement a Greedy MIS repair operator to replace the random ALNS repair for small neighborhoods.
+- **Goal**: Serve as a highly optimized heuristic repair operator that outperforms random polling in dense conflict zones.
+
+## Iteration 28: Edge-Cut ILP Formulation
+- **Task**: Formalize the Edge-Cut ILP constraints for the MAF problem for local subproblems ($K \le 20$) and implement a basic solver logic.
+- **Goal**: Obtain theoretical upper bounds and exact solutions for local neighborhood merges.
+
+## Iteration 29: Local ILP Polish Integration
+- **Task**: Integrate the "Local ILP Polish" phase into the final 30 seconds of the `main.rs` run loop.
+- **Goal**: Squeeze out the last 5-10 component reductions to push the result towards single digits before termination.
+
+## Iteration 30: Comprehensive Benchmark and Documentation
+- **Task**: Run 5-minute benchmarks on all hard instances using the full ALNS-SA-ILP pipeline.
+- **Goal**: Finalize the solver and push the ultimate results to upstream.
