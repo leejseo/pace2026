@@ -87,3 +87,63 @@ pub fn exact_subtree_kernelization(orig1: &OriginalNode, orig2: &OriginalNode, n
     
     (k1, k2, new_id_to_old_leaves, next_id)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tree::OriginalNode;
+
+    fn leaf(id: u32) -> Box<OriginalNode> {
+        Box::new(OriginalNode { left: None, right: None, label: Some(id) })
+    }
+
+    fn node(l: Box<OriginalNode>, r: Box<OriginalNode>) -> Box<OriginalNode> {
+        Box::new(OriginalNode { left: Some(l), right: Some(r), label: None })
+    }
+
+    #[test]
+    fn test_exact_subtree_kernelization_identical() {
+        let t1 = *node(leaf(1), node(leaf(2), leaf(3)));
+        let t2 = *node(leaf(1), node(leaf(2), leaf(3)));
+        
+        let (k1, k2, mapping, _next_id) = exact_subtree_kernelization(&t1, &t2, 3);
+        
+        assert!(k1.label.is_some());
+        assert_eq!(k1.label, k2.label);
+        let root_id = k1.label.unwrap();
+        assert!(root_id > 3);
+        
+        let mut expected_leaves = vec![1, 2, 3];
+        let mut mapped_leaves = mapping.get(&root_id).unwrap().clone();
+        expected_leaves.sort();
+        mapped_leaves.sort();
+        assert_eq!(mapped_leaves, expected_leaves);
+    }
+    
+    #[test]
+    fn test_exact_subtree_kernelization_partial() {
+        let t1 = *node(leaf(1), node(leaf(2), node(leaf(3), leaf(4))));
+        let t2 = *node(leaf(2), node(leaf(1), node(leaf(3), leaf(4))));
+        
+        let (k1, k2, mapping, _next_id) = exact_subtree_kernelization(&t1, &t2, 4);
+        
+        assert!(k1.label.is_none());
+        assert!(k2.label.is_none());
+        
+        let k1_r = k1.right.unwrap();
+        let k1_rr = k1_r.right.unwrap();
+        assert!(k1_rr.label.is_some());
+        let sub_id = k1_rr.label.unwrap();
+        assert!(sub_id > 4);
+        
+        let k2_r = k2.right.unwrap();
+        let k2_rr = k2_r.right.unwrap();
+        assert_eq!(k2_rr.label, Some(sub_id));
+        
+        let mut expected_leaves = vec![3, 4];
+        let mut mapped_leaves = mapping.get(&sub_id).unwrap().clone();
+        expected_leaves.sort();
+        mapped_leaves.sort();
+        assert_eq!(mapped_leaves, expected_leaves);
+    }
+}
